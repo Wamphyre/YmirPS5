@@ -37,6 +37,7 @@ public:
     /// @brief Attempts to open a host CD device at the specified path. Accepted path formats vary per operating system:
     /// - Windows: drive letters ("D:"), NT device paths ("\Device\CdRom0") or DOS paths ("\\.\D:", "\\.\CdRom0")
     /// - Linux: SCSI generic device paths ("/dev/sg0")
+    /// - PS5: CAM optical device paths ("/dev/cd0")
     /// - Other systems: TBD
     /// @param[in] path the host device path. Enumerate with `ymir::media::host::EnumerateHostCDDrives()`.
     /// @param[in] timeout maximum time to wait for the device to be ready

@@ -4,6 +4,8 @@
 
 A work-in-progress Sega Saturn emulator.
 
+Para probar el port de PS5 con un CD original, consulta la [instalación y diagnóstico](#ps5).
+
 Join the [Discord community](https://discord.gg/NN3A7n5dzn).
 
 Find the official compatibility list [here](https://docs.google.com/spreadsheets/d/1SLZzL9LelSlpEmTKy8cjaQnE7mew2uW1rfCgcekO58Q/edit?usp=sharing).
@@ -46,6 +48,47 @@ Grab the latest release: [stable](https://github.com/ymir-emu/Ymir/releases/late
 - A work-in-progress feature-rich debugger
 
 Ymir runs on Windows 10 or later, macOS 12 (Monterey) or later, most modern and popular Linux distributions and FreeBSD, and supports x86-64 (Intel, AMD) and ARM CPUs.
+
+
+## PS5
+
+Ymir PS5 es una build de desarrollo con un menú para DualSense, lectura directa de CDs de Saturn por USB y carga de imágenes. El paquete incluye un backend Vulkan con AMD FSR 1 y generación de fotogramas FSR 3. La compilación y el paquete se han comprobado en Linux. El arranque, el lector físico y los modos de vídeo siguen pendientes de verificar en consola.
+
+### Instalar el ZIP y la BIOS
+
+1. Extrae `YmirPS5-PPSA98567.zip` en tu PC. Copia la carpeta `PPSA98567` completa por FTP a `/data/homebrew/` de la PS5, usando el puerto de tu servidor FTP. Con la configuración predeterminada de ShadowMountPlus, la ruta final del ejecutable es `/data/homebrew/PPSA98567/eboot.bin`. La misma carpeta contiene `sce_sys/param.json` y `sce_module/libc.prx`. [Rutas de ShadowMountPlus](https://github.com/drakmor/ShadowMountPlus#scan-paths)
+2. Crea `/data/YmirPS5/` en la PS5 y copia el volcado de la BIOS de tu Sega Saturn como `/data/YmirPS5/bios.bin`. Debe medir **512 KiB (524 288 bytes)**. Si Ymir no encuentra la BIOS ahí, también busca `/download0/bios.bin` dentro del entorno de la aplicación. Usa esa ruta alternativa si tu lanzador te permite copiar archivos allí.
+3. Si **Ymir PS5** aún no aparece en Inicio, recarga el lanzador homebrew para que vuelva a buscar aplicaciones. Abre Ymir PS5. Para un CD original, conecta el lector óptico USB, inserta el disco y elige **Arrancar disco USB**. Para una imagen, elige **Cargar una imagen**.
+
+El ID de Ymir PS5 es **`PPSA98567`**. SwanStationPS5 usa **`PPSA98510`**. Las dos carpetas pueden coexistir bajo `/data/homebrew/`. [ID de Ymir](apps/ymir-ps5/param.json) · [Instalación de SwanStationPS5](https://github.com/darkxex/SwanStationPS5#getting-started)
+
+### Menú de Ymir PS5
+
+- **Cargar una imagen** admite CHD, BIN/CUE, IMG/CCD/SUB, MDF/MDS e ISO. Copia juegos en `/data/YmirPS5/games/`, junto a la aplicación en `/data/homebrew/PPSA98567/games/` o en una unidad USB que el lanzador exponga a Ymir. Mantén juntos los archivos de cada juego y selecciona su `.cue`, `.ccd` o `.mds` cuando corresponda.
+- **Vídeo** ofrece salida 1080p, 1440p o 2160p y relaciones de aspecto 4:3, 16:9, 16:10 o píxeles cuadrados. Con Vulkan también puedes activar **FSR 1** y **generación de fotogramas FSR 3** en x2 o x4. La interpolación efectiva depende del ritmo de fotogramas del juego y de la frecuencia de la pantalla. [Presentador de SwanStationPS5](https://github.com/darkxex/SwanStationPS5/tree/9ccc1dcee0b94758c8389e2cb9c76a3465fe7806/src/platform/vk)
+- **Partidas guardadas** permite guardar, cargar y borrar estados en cinco ranuras por disco. Desde **Memoria interna de Saturn** puedes ver y borrar partidas, o exportar e importar la memoria completa mediante `memory-transfer.bin`. Los estados y la exportación se guardan junto a la BIOS si se puede escribir en esa carpeta. Ymir también puede usar `/data/YmirPS5/` o `/download0/` como destino alternativo.
+
+**Cruz** acepta y **círculo** vuelve. La **cruceta** o el **stick** mueven la selección y **L1/R1** pasan una página. Durante el juego, pulsa el **panel táctil** para abrir el menú de pausa. **L3 + R3** cierra Ymir.
+
+### Ver el log del lector USB
+
+Esta build escribe en `stderr` y en la salida de depuración del sistema. Si tu lanzador captura `stderr`, abre su consola. Si ya tienes `klogsrv` activo en la PS5, conéctate desde el PC **antes de arrancar Ymir** y busca las líneas que empiezan por `Ymir PS5:`. Sustituye `192.168.1.50` por la IP de tu consola. [Uso de klogsrv](https://github.com/ps5-payload-dev/klogsrv#usage)
+
+```sh
+nc 192.168.1.50 3232 | tee ymir-ps5.log
+```
+
+`tee` guarda la captura en el PC. Ymir no crea un archivo de log en la PS5.
+
+| Mensaje | Qué indica |
+| --- | --- |
+| `Expected a 512 KiB Saturn BIOS at …` | Revisa la ruta, el nombre `bios.bin` y el tamaño. Ymir necesita la BIOS para arrancar el disco o la imagen desde el menú. |
+| `Cannot open USB CD drive…` | Ymir no pudo abrir el lector. Comprueba que el entorno de ejecución ve una unidad `/dev/cdN` y permite que Ymir acceda a `/dev/xpt0` y al dispositivo `/dev/passN` asociado. |
+| `Connected to /dev/cd0` | Ymir abrió el lector. Puede aparecer aunque la bandeja esté vacía. |
+| `Disc present, but no Saturn header could be read` | El lector informó de que hay un disco, pero Ymir no pudo leer o validar su cabecera de Saturn. |
+| `Saturn disc: …` | Ymir leyó y reconoció la cabecera. Comprueba que el juego pasa de la BIOS a su pantalla de inicio. |
+
+Consulta la [compilación y los controles de PS5](docs/ps5.md).
 
 
 ## Usage

@@ -1,5 +1,6 @@
 #include <ymir/media/cd_device/cd_device_host.hpp>
 
+#include <ymir/media/cd_utils.hpp>
 #include <ymir/media/scsi.hpp>
 
 #include <ymir/util/arith_ops.hpp>
@@ -19,6 +20,13 @@
 // - The frontend may register a callback to receive immediate notifications on device state changes
 
 namespace ymir::media {
+
+namespace {
+
+    constexpr uint32 kRawSectorSize = 2352;
+    constexpr uint32 kRawSectorWithSubchannel = kRawSectorSize + 96;
+
+} // namespace
 
 namespace grp {
 
@@ -61,9 +69,8 @@ HostCDDevice::HostCDDevice(std::string path, std::chrono::milliseconds timeout,
     // Wait for the specified amount of time for device to be ready
     using namespace std::chrono_literals;
     using clk = std::chrono::steady_clock;
-    const auto t0 = clk::now();
-    const auto deadline = t0 + timeout;
-    while (t0 < deadline) {
+    const auto deadline = clk::now() + timeout;
+    while (clk::now() < deadline) {
         if (PollDriveState() != DriveState::Unknown) {
             break;
         }
@@ -116,21 +123,9 @@ DriveState HostCDDevice::PollDriveStateImpl() {
         m_toc = ts.toc;
         m_header = ts.header;
         m_fs = ts.fs;
+        m_driveState = ts.targetDriveState;
         ts.discInfoChanged.store(false, std::memory_order_release);
-    }
-
-    bool notifyMediaStateChange = false;
-    const DriveState newDriveState = ts.targetDriveState;
-    if (m_driveState != newDriveState) {
-        if (m_driveState == DriveState::MediaPresent || newDriveState == DriveState::MediaPresent) {
-            notifyMediaStateChange = true;
-        }
-        m_driveState = newDriveState;
-    }
-
-    bool expected = true;
-    notifyMediaStateChange |= ts.mediaStateChanged.compare_exchange_strong(expected, false);
-    if (notifyMediaStateChange) {
+        lock.unlock();
         m_sectorCache.Flush();
         m_cbOnMediaChanged();
     }
@@ -274,7 +269,8 @@ void HostCDDevice::WorkerThread() {
         // TODO: make this configurable
         static constexpr uint32 kMaxSectorFetchSize = 16;
         static constexpr uint32 kSectorPrefetchCapacity = 32;
-        const uint32 sectorFetchSize = kSectorPrefetchCapacity - m_sectorPrefetchCache.Size();
+        const uint32 sectorFetchSize =
+            std::min<size_t>(kMaxSectorFetchSize, kSectorPrefetchCapacity - m_sectorPrefetchCache.Size());
 
         const bool shouldReadSectors =
             // actively reading sectors
@@ -362,7 +358,10 @@ void HostCDDevice::WorkerThread() {
         }
 
         // Read and cache sectors + positions if requested
-        if (shouldReadSectors) {
+        if (!running) {
+            break;
+        }
+        if (shouldReadSectors && ts.readSectors) {
             uint32 numSectors;
             if (HostPrefetchSectors(ts.nextSector, sectorFetchSize, numSectors)) {
                 ts.nextSector += numSectors;
@@ -389,8 +388,13 @@ void HostCDDevice::InitializeWorkerDiscInfo() {
 
     std::unique_lock lock{ts.mtxDiscInfo};
 
-    m_sectorPrefetchCache.Flush();
+    StopPrefetcher();
+#if defined(__PROSPERO__)
+    m_useRawSubchannel = true;
+#endif
     if (ts.driveState == DriveState::MediaPresent) {
+        ts.toc.Clear();
+        ts.toc.LoadFrom(HostReadTOC());
         std::array<uint8, 2352> headerSector{};
         DiscPosition pos{};
         if (HostReadSectorAndPosition(150u, headerSector, pos)) {
@@ -398,7 +402,6 @@ void HostCDDevice::InitializeWorkerDiscInfo() {
         } else {
             ts.header.Invalidate();
         }
-        ts.toc.LoadFrom(HostReadTOC());
         if (ts.fs.Read(m_fsReader)) {
             devlog::info<grp::host>("Filesystem built successfully");
         } else {
@@ -411,9 +414,8 @@ void HostCDDevice::InitializeWorkerDiscInfo() {
         devlog::info<grp::host>("Disc absent - filesystem cleared");
     }
     ts.indexFADs.clear();
-    ts.discInfoChanged.store(true, std::memory_order_release);
-    ts.mediaStateChanged.store(true, std::memory_order_release);
     ts.targetDriveState = ts.driveState;
+    ts.discInfoChanged.store(true, std::memory_order_release);
 }
 
 void HostCDDevice::ClearMainDiscInfo() {
@@ -433,9 +435,8 @@ void HostCDDevice::ClearWorkerDiscInfo() {
     ts.toc.Clear();
     ts.fs.Clear();
     ts.indexFADs.clear();
-    ts.discInfoChanged.store(true, std::memory_order_release);
-    ts.mediaStateChanged.store(true, std::memory_order_release);
     ts.targetDriveState = ts.driveState;
+    ts.discInfoChanged.store(true, std::memory_order_release);
 }
 
 void HostCDDevice::SetSeekResult(uint32 counter, uint32 frameAddress) {
@@ -463,28 +464,44 @@ void HostCDDevice::StopPrefetcher() {
 }
 
 std::vector<TOCEntry> HostCDDevice::HostReadTOC() const {
-    std::vector<uint8> buffer{};
-    buffer.resize(8);
+#if defined(__PROSPERO__)
+    // Use the same allocation length that SwanStationPS5 uses for USB bridges.
+    std::array<uint8, 2048> buffer{};
+#else
+    std::vector<uint8> buffer(8);
+#endif
 
     // Build Read TOC command
     auto cdb = scsi::op::MakeReadTOC(buffer.size());
     uint32 readSize{};
 
-    // Execute once to get required buffer size
-    if (!host::SendSCSIInCommand(m_devHandle, cdb, buffer, readSize)) {
+    if (!host::SendSCSIInCommand(m_devHandle, cdb, buffer, readSize) || readSize < 4) {
         return {};
     }
 
-    // Redo the request with a buffer large enough to fit the data
     const auto bufferLength = util::ReadBE<uint16>(&buffer[0]);
-    buffer.resize(bufferLength + 2);
+    const size_t totalSize = bufferLength + 2u;
+    if (totalSize < 20 || totalSize > 4 + (99 + 1) * 8 || (totalSize - 4) % 8 != 0) {
+        return {};
+    }
+#if !defined(__PROSPERO__)
+    // Redo the request with a buffer large enough to fit the data.
+    buffer.resize(totalSize);
     util::WriteBE<uint16>(&cdb[7], buffer.size());
     if (!host::SendSCSIInCommand(m_devHandle, cdb, buffer, readSize)) {
+        return {};
+    }
+#endif
+    if (readSize < totalSize || util::ReadBE<uint16>(buffer.data()) != bufferLength) {
         return {};
     }
 
     const uint8 firstTrackNum = buffer[2];
     const uint8 lastTrackNum = buffer[3];
+    if (firstTrackNum == 0 || lastTrackNum < firstTrackNum || lastTrackNum > 99 ||
+        totalSize != 4 + (lastTrackNum - firstTrackNum + 2u) * 8) {
+        return {};
+    }
 
     // Convert to TOCEntry list
     std::vector<TOCEntry> toc{};
@@ -525,14 +542,20 @@ std::vector<TOCEntry> HostCDDevice::HostReadTOC() const {
 
     // Tracks
     size_t pos = 4;
-    const size_t totalSize = bufferLength + 2;
+    uint32 previousLBA = 0;
     while (pos + 8 <= totalSize) {
         const uint8 *trackData = &buffer[pos];
 
         const uint8 control = bit::extract<0, 3>(trackData[1]);
         const uint8 adr = bit::extract<4, 7>(trackData[1]);
         const uint8 trackNum = trackData[2];
-        const uint32 fad = util::ReadBE<uint32>(&trackData[4]) + 150u;
+        const uint8 expectedTrack = pos + 8 == totalSize ? 0xAA : firstTrackNum + (pos - 4) / 8;
+        const uint32 lba = util::ReadBE<uint32>(&trackData[4]);
+        if (trackNum != expectedTrack || lba >= 100u * 60 * 75 - 150 || (pos > 4 && lba <= previousLBA)) {
+            return {};
+        }
+        previousLBA = lba;
+        const uint32 fad = lba + 150u;
 
         if (trackNum == 0xAA) {
             auto &leadoutEntry = toc[2];
@@ -566,156 +589,129 @@ std::vector<TOCEntry> HostCDDevice::HostReadTOC() const {
     return toc;
 }
 
+bool HostCDDevice::HostReadSectors(uint32 frameAddress, uint32 sectorCount, std::span<uint8> buffer,
+                                   uint32 &sectorSize) {
+    if (frameAddress < 150 || sectorCount == 0) {
+        return false;
+    }
+
+    uint8 format = 0xf8;
+#if defined(__PROSPERO__)
+    if (const TrackInfo *track = m_threadState.toc.GetTrackInfoForFAD(frameAddress);
+        track != nullptr && !bit::test<6>(track->controlADR)) {
+        // Some USB bridges reject sync/header field requests for CD-DA.
+        format = 0x10;
+    }
+#endif
+
+    const auto read = [&](uint8 subchannel, uint32 stride) {
+        uint32 bytesRead{};
+        const auto cdb = scsi::op::MakeReadCD(frameAddress - 150, sectorCount, format, subchannel);
+        const auto output = buffer.first(sectorCount * stride);
+        if (!host::SendSCSIInCommand(m_devHandle, cdb, output, bytesRead) || bytesRead != output.size()) {
+            return false;
+        }
+        sectorSize = stride;
+        return true;
+    };
+
+#if defined(__PROSPERO__)
+    if (m_useRawSubchannel && read(1, kRawSectorWithSubchannel)) {
+        return true;
+    }
+    // Raw P-W subchannel reads are optional. The TOC can supply index 1
+    // position information for drives that only support raw sector data.
+    if (m_threadState.toc.GetTrackInfoForFAD(frameAddress) != nullptr && read(0, kRawSectorSize)) {
+        m_useRawSubchannel = false;
+        return true;
+    }
+    return false;
+#else
+    return read(1, kRawSectorWithSubchannel);
+#endif
+}
+
+DiscPosition HostCDDevice::DecodePosition(uint32 frameAddress, std::span<const uint8> sector) const {
+#if defined(__PROSPERO__)
+    if (sector.size() == kRawSectorSize) {
+        const TrackInfo *track = m_threadState.toc.GetTrackInfoForFAD(frameAddress);
+        if (track == nullptr) {
+            return {};
+        }
+        const auto [relM, relS, relF] = FADToMSF(frameAddress - track->startFrameAddress);
+        const auto [m, s, f] = FADToMSF(frameAddress);
+        return {track->controlADR,
+                util::to_bcd(track->number),
+                0x01,
+                util::to_bcd(relM),
+                util::to_bcd(relS),
+                util::to_bcd(relF),
+                0,
+                util::to_bcd(m),
+                util::to_bcd(s),
+                util::to_bcd(f)};
+    }
+#endif
+
+    const auto subchannel = sector.subspan(kRawSectorSize);
+    std::array<uint8, 12> subQ{};
+    for (uint32 i = 0; i < subchannel.size(); ++i) {
+        subQ[i >> 3u] |= bit::extract<6>(subchannel[i]) << (~i & 7u);
+    }
+    return {subQ[0], subQ[1], subQ[2], subQ[3], subQ[4], subQ[5], subQ[6], subQ[7], subQ[8], subQ[9]};
+}
+
 bool HostCDDevice::HostReadSectorAndPosition(uint32 frameAddress, std::span<uint8, 2352> outSector,
                                              DiscPosition &outPos) {
-    std::array<uint8, 2352 + 96> data{};
-    const auto cdb = scsi::op::MakeReadCD(frameAddress - 150u, 1, 0xF8, 1);
-    uint32 readSize;
-    if (!host::SendSCSIInCommand(m_devHandle, cdb, data, readSize)) {
+    std::array<uint8, kRawSectorWithSubchannel> data{};
+    uint32 sectorSize{};
+    if (!HostReadSectors(frameAddress, 1, data, sectorSize)) {
         return false;
     }
-    if (readSize < data.size()) {
-        // We expect to be able to read the full raw sector and the P-W raw subcode data
-        return false;
-    }
-
-    // Copy sector data to output
-    std::copy_n(data.cbegin(), 2352, outSector.begin());
-
-    // Raw subcode data comes at the end of the buffer
-    std::span<const uint8> subcode{data.begin() + 2352, data.end()};
-
-    // Extract position data from Q subchannel
-    std::array<uint8, 12> subQ{};
-    for (uint32 i = 0; i < 96; ++i) {
-        subQ[i >> 3u] |= bit::extract<6>(subcode[i]) << (~i & 7u);
-    }
-    outPos.controlADR = subQ[0];
-    outPos.track = subQ[1];
-    outPos.index = subQ[2];
-    outPos.min = subQ[3];
-    outPos.sec = subQ[4];
-    outPos.frame = subQ[5];
-    outPos.zero = subQ[6];
-    outPos.amin = subQ[7];
-    outPos.asec = subQ[8];
-    outPos.aframe = subQ[9];
-
+    std::copy_n(data.begin(), outSector.size(), outSector.begin());
+    outPos = DecodePosition(frameAddress, std::span{data}.first(sectorSize));
     return true;
 }
 
 bool HostCDDevice::HostReadSectorUserData(uint32 frameAddress, std::span<uint8, 2048> outSector) const {
-    const auto cdb = scsi::op::MakeRead10(frameAddress - 150u, 1);
-    uint32 readSize;
-    if (!host::SendSCSIInCommand(m_devHandle, cdb, outSector, readSize)) {
+    if (frameAddress < 150) {
         return false;
     }
-    return readSize == outSector.size();
+    const auto cdb = scsi::op::MakeRead10(frameAddress - 150u, 1);
+    uint32 readSize{};
+    return host::SendSCSIInCommand(m_devHandle, cdb, outSector, readSize) && readSize == outSector.size();
 }
 
-bool HostCDDevice::HostReadSectorForCache(uint32 frameAddress, SectorEntry &outEntry) const {
-    std::array<uint8, 2352 + 96> data{};
-    const auto cdb = scsi::op::MakeReadCD(frameAddress - 150u, 1, 0xF8, 1);
-    uint32 readSize;
-    if (!host::SendSCSIInCommand(m_devHandle, cdb, data, readSize)) {
-        return false;
-    }
-    if (readSize < data.size()) {
-        // We expect to be able to read the full raw sector and the P-W raw subcode data
-        return false;
-    }
-
-    // Copy sector data to output
-    std::copy_n(data.cbegin(), 2352, outEntry.sector.begin());
-    std::copy_n(data.cbegin() + 2352, 96, outEntry.subchannel.begin());
-
-    // Extract position data from Q subchannel
-    std::array<uint8, 12> subQ{};
-    for (uint32 i = 0; i < 96; ++i) {
-        subQ[i >> 3u] |= bit::extract<6>(outEntry.subchannel[i]) << (~i & 7u);
-    }
-    outEntry.pos.controlADR = subQ[0];
-    outEntry.pos.track = subQ[1];
-    outEntry.pos.index = subQ[2];
-    outEntry.pos.min = subQ[3];
-    outEntry.pos.sec = subQ[4];
-    outEntry.pos.frame = subQ[5];
-    outEntry.pos.zero = subQ[6];
-    outEntry.pos.amin = subQ[7];
-    outEntry.pos.asec = subQ[8];
-    outEntry.pos.aframe = subQ[9];
-
-    return true;
+bool HostCDDevice::HostReadSectorForCache(uint32 frameAddress, SectorEntry &outEntry) {
+    return HostReadSectorAndPosition(frameAddress, outEntry.sector, outEntry.pos);
 }
 
 bool HostCDDevice::HostPrefetchSectors(uint32 frameAddress, uint32 sectorCount, uint32 &outReadSectors) {
-    if (sectorCount == 0u) {
-        // Bail out immediately if no sectors were requested
+    const auto &toc = m_threadState.toc;
+    const TrackInfo *track = toc.GetTrackInfoForFAD(frameAddress);
+    const uint32 trackEnd = track != nullptr ? track->endFrameAddress : toc.GetEndFrameAddress();
+    if (frameAddress > trackEnd) {
         return false;
     }
 
-    static constexpr size_t kSectorSize = 2352 + 96;
-
-    auto &ts = m_threadState;
-
-    // Don't read past the end of the current track
-    const uint32 endFrameAddress = frameAddress + sectorCount - 1u;
-    const TrackInfo *trackInfo = ts.toc.GetTrackInfoForFAD(frameAddress);
-    const uint32 trackEndFrameAddress = trackInfo != nullptr ? trackInfo->endFrameAddress : ts.toc.GetEndFrameAddress();
-    if (endFrameAddress > trackEndFrameAddress) {
-        const uint32 extraSectors = trackEndFrameAddress - endFrameAddress;
-        if (extraSectors >= sectorCount) {
-            return false;
-        }
-        sectorCount -= extraSectors;
-    }
-
-    // Issue READ CD command
-    std::vector<uint8> data{};
-    data.resize(kSectorSize * sectorCount);
-    const auto cdb = scsi::op::MakeReadCD(frameAddress - 150u, sectorCount, 0xF8, 1);
-    uint32 readSize;
-    if (!host::SendSCSIInCommand(m_devHandle, cdb, data, readSize)) {
-        return false;
-    }
-    if (readSize % kSectorSize != 0) {
-        // Bail out if we find unexpected sector sizes
+    // Keep the request within one track (the last FAD is inclusive).
+    sectorCount = std::min(sectorCount, trackEnd - frameAddress + 1u);
+    std::vector<uint8> data(kRawSectorWithSubchannel * sectorCount);
+    uint32 sectorSize{};
+    if (!HostReadSectors(frameAddress, sectorCount, data, sectorSize)) {
         return false;
     }
 
-    // Read sectors and parse subchannel data
-    uint32 sectorIndex = 0u;
-    while (sectorIndex * kSectorSize < readSize) {
-        devlog::trace<grp::cache>("{:06X} prefetched, usage: {}", frameAddress + sectorIndex,
-                                  m_sectorPrefetchCache.Size());
-        auto entry = m_sectorPrefetchCache.Emplace(frameAddress + sectorIndex);
-
-        // Copy sector data to cache
-        const uint32 offset = sectorIndex * kSectorSize;
-        std::copy_n(data.cbegin() + offset, 2352, entry->sector.begin());
-        std::copy_n(data.cbegin() + offset + 2352, 96, entry->subchannel.begin());
-
-        // Extract position data from Q subchannel
-        std::array<uint8, 12> subQ{};
-        for (uint32 i = 0; i < 96; ++i) {
-            subQ[i >> 3u] |= bit::extract<6>(entry->subchannel[i]) << (~i & 7u);
-        }
-        DiscPosition &pos = entry->pos;
-        pos.controlADR = subQ[0];
-        pos.track = subQ[1];
-        pos.index = subQ[2];
-        pos.min = subQ[3];
-        pos.sec = subQ[4];
-        pos.frame = subQ[5];
-        pos.zero = subQ[6];
-        pos.amin = subQ[7];
-        pos.asec = subQ[8];
-        pos.aframe = subQ[9];
-
-        ++sectorIndex;
+    for (uint32 i = 0; i < sectorCount; ++i) {
+        const uint32 address = frameAddress + i;
+        devlog::trace<grp::cache>("{:06X} prefetched, usage: {}", address, m_sectorPrefetchCache.Size());
+        auto entry = m_sectorPrefetchCache.Emplace(address);
+        const auto sector = std::span{data}.subspan(i * sectorSize, sectorSize);
+        std::copy_n(sector.begin(), entry->sector.size(), entry->sector.begin());
+        entry->pos = DecodePosition(address, sector);
     }
 
-    outReadSectors = sectorIndex;
+    outReadSectors = sectorCount;
     return true;
 }
 

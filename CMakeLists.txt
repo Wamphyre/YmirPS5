@@ -10,8 +10,14 @@ endif ()
 # is available to determine whether to make SPIR-V compilation required or optional.
 # Vulkan support is excluded from macOS as the system doesn't support it natively.
 # Metal is the preferred backend on that platform.
-if (NOT APPLE)
+if (NOT APPLE AND NOT PS5)
     find_package(Vulkan COMPONENTS SPIRV-Tools)
+endif ()
+
+if (PS5)
+    # The SDK compiler wrappers supply the target triple and libc++ headers.
+    # clang-scan-deps invokes the underlying compiler without those arguments.
+    set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 endif ()
 
 include(cmake/CMakeRC.cmake)
@@ -64,7 +70,11 @@ endif ()
 ## Template:
 ## option(Ymir_FF_[NAME] "[description]" [default-state])
 ##   default state is a BOOL, usually OFF or ${Ymir_LOCAL_BUILD}
-option(Ymir_FF_HOST_CD_DRIVES "Enable support for reading discs from host drives" ${Ymir_LOCAL_BUILD})
+set(_ymir_host_cd_default ${Ymir_LOCAL_BUILD})
+if (PS5)
+    set(_ymir_host_cd_default ON)
+endif ()
+option(Ymir_FF_HOST_CD_DRIVES "Enable support for reading discs from host drives" ${_ymir_host_cd_default})
 option(Ymir_FF_ENABLE_UNIMPL_GFX_BACKENDS "Enable unimplemented graphics backends" ${Ymir_LOCAL_BUILD})
 
 if (Ymir_LIBRARY_ONLY)
@@ -163,10 +173,14 @@ add_subdirectory(libs)
 
 if (NOT Ymir_LIBRARY_ONLY)
     ## Include apps
-    add_subdirectory(apps)
+    if (PS5)
+        add_subdirectory(apps/ymir-ps5)
+    else ()
+        add_subdirectory(apps)
+    endif ()
 
     ## Include the unit tests if the user wanted them (included by default when top-level)
-    if (Ymir_ENABLE_TESTS)
+    if (Ymir_ENABLE_TESTS AND NOT PS5)
         enable_testing()
         add_subdirectory(tests)
     endif ()

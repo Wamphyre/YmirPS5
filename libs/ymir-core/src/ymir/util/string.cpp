@@ -11,6 +11,10 @@
         #define NOMINMAX
     #endif
     #include <stringapiset.h>
+#elif defined(__PROSPERO__)
+    #include <codecvt>
+    #include <locale>
+    #include <stdexcept>
 #else
     #include <cassert>
     #include <iconv.h>
@@ -105,6 +109,12 @@ std::wstring StringToWString(std::string_view str) {
     MultiByteToWideChar(CP_UTF8, 0, &str[0], (int)str.size(), &wstr[0], size);
     return wstr;
 
+#elif defined(__PROSPERO__)
+    try {
+        return std::wstring_convert<std::codecvt_utf8<wchar_t>>{}.from_bytes(str.data(), str.data() + str.size());
+    } catch (const std::range_error &) {
+        return {};
+    }
 #else
     // Linux/macOS/FreeBSD implementation
 
@@ -153,6 +163,12 @@ std::string WStringToString(std::wstring_view wstr) {
     WideCharToMultiByte(CP_UTF8, 0, &wstr[0], (int)wstr.size(), &str[0], size, nullptr, nullptr);
     return str;
 
+#elif defined(__PROSPERO__)
+    try {
+        return std::wstring_convert<std::codecvt_utf8<wchar_t>>{}.to_bytes(wstr.data(), wstr.data() + wstr.size());
+    } catch (const std::range_error &) {
+        return {};
+    }
 #else
     // Linux/macOS/FreeBSD implementation
 

@@ -4,7 +4,7 @@ add_library(xxHash
 	xxHash/xxh3.h
 )
 
-if ("x86_64" IN_LIST ARCHITECTURES)
+if ("x86_64" IN_LIST ARCHITECTURES AND NOT PS5)
     set(XXHSUM_DISPATCH ON)
 	# Apple is the only target that supports fat binaries
 	if (APPLE)

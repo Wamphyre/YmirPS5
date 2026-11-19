@@ -73,7 +73,7 @@ endif ()
 ####################################################################################################
 # Other dependencies
 
-if (NOT Ymir_LIBRARY_ONLY)
+if (NOT Ymir_LIBRARY_ONLY AND NOT PS5)
     # SDL3 - https://github.com/libsdl-org/SDL
     # - Unable to configure libdecor support for Wayland
     # - Must be added BEFORE dear ImGui

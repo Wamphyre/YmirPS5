@@ -2,6 +2,8 @@
 
 Ymir requires [CMake 3.28+](https://cmake.org/) and a C++20 compiler.
 
+For the PS5 cross-build and USB optical drive setup, see [Ymir on PS5](docs/ps5.md).
+
 The repository includes several vendored dependencies as Git submodules. When cloning, make sure to include the `--recurse-submodules` parameter.
 You can also initialize submodules with `git submodule update --init --recursive` after a `git clone` or when pulling changes.
 

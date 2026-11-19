@@ -1,0 +1,7 @@
+file(READ "${MANIFEST}" _manifest)
+string(REGEX MATCH "^[0-9a-fA-F]+" _expected "${_manifest}")
+file(SHA256 "${PRX}" _actual)
+if (NOT _actual STREQUAL _expected)
+    file(REMOVE "${PRX}")
+    message(FATAL_ERROR "Generated libc.prx differs from the SwanStationPS5 runtime manifest")
+endif ()

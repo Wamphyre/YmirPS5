@@ -88,7 +88,6 @@ private:
 
         uint32 frameAddress;
         std::array<uint8, 2352> sector{};
-        std::array<uint8, 96> subchannel{};
         DiscPosition pos{};
     };
 
@@ -181,14 +180,13 @@ private:
         std::atomic_bool discInfoChanged = false;
 
         // driveState contains the latest state polled from the hardware, for internal use only.
-        // targetDriveState contants the state to be returned in the next PollDriveState() call.
+        // targetDriveState contains the state to be returned in the next PollDriveState() call.
         // The separation allows enforcing the PollDriveState() contract that requires the TOC and header to be fully
         // updated when the function returns DriveState::MediaPresent. This is done by only updating targetDriveState
         // once the operation fully completes.
 
         DriveState driveState = DriveState::Unknown;
         DriveState targetDriveState = DriveState::Unknown;
-        std::atomic_bool mediaStateChanged = false;
 
         std::atomic_uint32_t seekCounter = 0; // last seek request counter executed
         std::atomic_uint32_t seekFAD = 0;     // last seek target FAD
@@ -354,11 +352,19 @@ private:
     /// @return `true` if the sector was successfully read, `false` if not
     bool HostReadSectorUserData(uint32 frameAddress, std::span<uint8, 2048> outSector) const;
 
-    /// @brief Sends a command to the host device to read the raw sector and subchannel for cache storage.
+    /// @brief Reads the raw sector and its position for cache storage.
     /// @param[in] frameAddress the frame address
     /// @param[out] outEntry the cache entry to store all data into
     /// @return `true` if the sector was successfully read, `false` if not
-    bool HostReadSectorForCache(uint32 frameAddress, SectorEntry &outEntry) const;
+    bool HostReadSectorForCache(uint32 frameAddress, SectorEntry &outEntry);
+
+    bool HostReadSectors(uint32 frameAddress, uint32 sectorCount, std::span<uint8> buffer, uint32 &sectorSize);
+    DiscPosition DecodePosition(uint32 frameAddress, std::span<const uint8> sector) const;
+
+#if defined(__PROSPERO__)
+    // Used only by the worker thread and reset whenever the medium changes.
+    bool m_useRawSubchannel = true;
+#endif
 
     /// @brief Prefetches and caches a number of sectors starting at the specified frame address.
     /// @param[in] frameAddress the starting frame address

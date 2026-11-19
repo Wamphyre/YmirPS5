@@ -16,17 +16,23 @@ namespace ymir::media::host {
 /// @brief An opaque OS handle to a file or device.
 ///
 /// On Windows this is a `HANDLE`.
+/// On PS5 this points to a CAM device and its SCSI address.
 /// On POSIX systems this is a file descriptor (`int`).
 
 /// @var kInvalidDeviceHandle
 /// @brief Sentinel value representing an invalid OS device handle.
 ///
 /// On Windows this is `INVALID_HANDLE_VALUE`.
+/// On PS5 this is `nullptr`.
 /// On POSIX systems this is `-1`.
 
 #ifdef _WIN32
 using DeviceHandle = void *; // same as HANDLE
 inline const auto kInvalidDeviceHandle = reinterpret_cast<DeviceHandle>(static_cast<uintptr_t>(-1));
+#elif defined(__PROSPERO__)
+struct CAMDevice;
+using DeviceHandle = CAMDevice *;
+inline constexpr DeviceHandle kInvalidDeviceHandle = nullptr;
 #else // POSIX systems
 using DeviceHandle = int;
 inline constexpr DeviceHandle kInvalidDeviceHandle = -1;

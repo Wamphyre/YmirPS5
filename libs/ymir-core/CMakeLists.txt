@@ -343,7 +343,9 @@ target_compile_features(ymir-core PUBLIC cxx_std_20)
 
 ## Add OS-specific source files for host CD drive support
 if (Ymir_FF_HOST_CD_DRIVES)
-    if (WIN32)
+    if (PS5)
+        target_sources(ymir-core PRIVATE src/ymir/media/host_cd_ps5.cpp)
+    elseif (WIN32)
         target_sources(ymir-core PRIVATE src/ymir/media/host_cd_windows.cpp)
     elseif (CMAKE_SYSTEM_NAME STREQUAL "Linux")
         target_sources(ymir-core PRIVATE src/ymir/media/host_cd_linux.cpp)
@@ -552,7 +554,7 @@ elseif (APPLE)
     target_link_libraries(ymir-core PUBLIC
         Iconv::Iconv
     )
-elseif (UNIX) # Linux and FreeBSD
+elseif (UNIX AND NOT PS5) # Linux and FreeBSD
     find_package(Iconv REQUIRED)
     target_link_libraries(ymir-core PUBLIC
         Iconv::Iconv

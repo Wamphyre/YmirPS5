@@ -38,6 +38,9 @@ build/
 build-*/
 cmake-build-*/
 
+# Local test output
+/test/
+
 # CLion project metadata
 .idea/
 
