@@ -6,7 +6,7 @@ YmirPS5 is a Sega Saturn emulator for PlayStation 5. It is a port of [Ymir](http
 
 ## Installation
 
-1. Extract `YmirPS5-0.7.1-PPSA98567.zip` and copy the entire `PPSA98567` folder to the location your homebrew launcher scans. If it uses `/data/homebrew/`, the executable will be at `/data/homebrew/PPSA98567/eboot.bin`.
+1. Extract `YmirPS5-0.7.2-PPSA98567.zip` and copy the entire `PPSA98567` folder to the location your homebrew launcher scans. If it uses `/data/homebrew/`, the executable will be at `/data/homebrew/PPSA98567/eboot.bin`.
 2. Refresh the launcher's app list and select **YmirPS5** from the PS5 home screen to see its original Saturn-themed artwork and hear *Cold Orbit*, the selection music. Open it to start the emulator. On first launch, it creates `/data/YmirPS5/` and the folders listed below if the launcher grants write access.
 3. Copy a **512 KiB (524,288 bytes)** Sega Saturn BIOS dump to `/data/YmirPS5/bios/boot.bin`. You can copy it while the menu is open. YmirPS5 checks for it again when you load a game.
 4. Copy your disc images to `/data/YmirPS5/games/` and select **Game library**. For an original Saturn CD, follow the [USB optical drive setup](#usb-optical-drive).
@@ -30,7 +30,7 @@ The emulator also accepts either filename directly under `/data/YmirPS5/` or `/d
 Close YmirPS5 on the PS5. With its FTP server running, use the release ZIP and the console's IP address with `apps/ymir-ps5/tools/update_ps5.py`. The tool verifies the package and the staged uploads, then replaces changed title files. User settings, BIOS files, games, and saves stay in their existing directories.
 
 ```sh
-python3 apps/ymir-ps5/tools/update_ps5.py YmirPS5-0.7.1-PPSA98567.zip 192.0.2.1
+python3 apps/ymir-ps5/tools/update_ps5.py YmirPS5-0.7.2-PPSA98567.zip 192.0.2.1
 ```
 
 Add `--port PORT` if your FTP server uses a port other than 1337. Follow your loader's registration refresh procedure if an update introduces new dashboard media.

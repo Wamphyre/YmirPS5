@@ -53,6 +53,12 @@ struct CAMDevice {
     DriveState driveState = DriveState::Unknown;
     bool mediumChanged = false;
     std::chrono::steady_clock::time_point nextPoll{};
+
+    // Diagnostics for usb.log. Accessed only by the worker thread that owns
+    // this device.
+    uint64 readBytes = 0;
+    uint64 readTimeUs = 0;
+    uint32 readCommands = 0;
 };
 
 namespace {
@@ -66,7 +72,7 @@ namespace {
     std::atomic<unsigned> g_logCount{0};
 
     void Log(const char *format, ...) {
-        if (g_logCallback == nullptr || g_logCount.fetch_add(1, std::memory_order_relaxed) >= 64) {
+        if (g_logCallback == nullptr || g_logCount.fetch_add(1, std::memory_order_relaxed) >= 256) {
             return;
         }
         char buffer[256];
@@ -102,7 +108,7 @@ namespace {
 
     bool ReadThroughService(CAMDevice &device, std::span<const uint8> cdb, std::span<uint8> buffer, uint32 &size,
                             uint32 &sense) {
-        if (device.fd < 0 || !ps5disc::IsReadCommand(cdb, buffer.size())) {
+        if (device.fd < 0 || !ps5disc::IsSupportedCommand(cdb, buffer.size())) {
             return false;
         }
         ps5disc::Request request{};
@@ -233,8 +239,27 @@ namespace {
                      uint32 &sense) {
         size = 0;
         sense = 0;
+        const auto started = std::chrono::steady_clock::now();
         const bool ok = device.service ? ReadThroughService(device, cdb, buffer, size, sense)
                                        : SendCAMCommand(device, cdb, buffer, size, sense);
+        const auto elapsedUs =
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started).count();
+
+        if (!cdb.empty() && cdb[0] == scsi::op::kSetCDSpeed) {
+            Log("SET CD SPEED (%s): %s", device.service ? "service" : "CAM", ok ? "accepted" : "rejected");
+        }
+        if (ok && !cdb.empty() && cdb[0] == scsi::op::kReadCD && !buffer.empty()) {
+            device.readTimeUs += static_cast<uint64>(elapsedUs);
+            device.readBytes += size;
+            if (++device.readCommands % 64 == 0) {
+                const double seconds = static_cast<double>(device.readTimeUs) / 1'000'000.0;
+                const double kibPerSecond =
+                    seconds > 0 ? static_cast<double>(device.readBytes) / 1024.0 / seconds : 0.0;
+                Log("READ CD: %u commands, %llu KiB, %.1f KiB/s", device.readCommands,
+                    static_cast<unsigned long long>(device.readBytes / 1024), kibPerSecond);
+            }
+        }
+
         if (!ok && ((sense >> 8) == 0x0628 || (sense >> 8) == 0x023a)) {
             device.mediumChanged = true;
         }
@@ -370,7 +395,9 @@ DriveState PollDriveState(DeviceHandle handle) {
     if (now < handle->nextPoll && !handle->mediumChanged) {
         return handle->driveState;
     }
-    handle->nextPoll = now + 250ms;
+    // Polling more often than this interrupts USB transfers and buys nothing:
+    // disc removal is also reported by the read path.
+    handle->nextPoll = now + 1000ms;
 
     if (handle->fd < 0 || handle->mediumChanged) {
         handle->mediumChanged = false;
@@ -456,7 +483,7 @@ bool ExecuteRead(DeviceHandle handle, std::span<const uint8> cdb, std::span<uint
                  uint32 &sense) {
     size = 0;
     sense = 0;
-    return IsReadCommand(cdb, buffer.size()) && SendCAMCommand(*handle, cdb, buffer, size, sense);
+    return IsSupportedCommand(cdb, buffer.size()) && SendCAMCommand(*handle, cdb, buffer, size, sense);
 }
 
 } // namespace ps5disc

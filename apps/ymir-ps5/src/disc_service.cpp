@@ -33,7 +33,7 @@ void Serve(int client, host::DeviceHandle drive) {
             return;
         }
         const auto cdb = std::span{request}.subspan(8, length);
-        if (!disc::IsReadCommand(cdb, bytes)) {
+        if (!disc::IsSupportedCommand(cdb, bytes)) {
             return;
         }
 

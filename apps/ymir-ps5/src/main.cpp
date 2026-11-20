@@ -190,6 +190,8 @@ private:
     bool m_menuOpen = true;
     bool m_running = true;
     bool m_dirty = true;
+    bool m_menuPresented = false;
+    Clock::time_point m_lastMenuPresent{};
     bool m_waitForRelease = false;
     DriveState m_driveState = DriveState::Unknown;
     std::string m_game;
@@ -905,6 +907,7 @@ int Frontend::Run(std::ofstream &launchLog) {
         bool drawable = true;
         if (m_menuOpen) {
             UpdateCovers();
+            bool menuRepainted = false;
             if (m_dirty) {
                 std::vector<MenuHint> hints;
                 if (m_page != Page::Controls && !m_rows.empty()) {
@@ -943,8 +946,16 @@ int Frontend::Run(std::ofstream &launchLog) {
                                 m_page != Page::Controls);
                 }
                 m_dirty = false;
+                menuRepainted = true;
             }
-            drawable = m_video.PresentMenu(m_menu.Pixels(), m_settings.frameGen != 0);
+            // The menu is a static 1080p image. Uploading it every frame wastes
+            // CPU/GPU bandwidth, so present it when it changes and at a slow
+            // heartbeat to recover from compositor/device events.
+            if (menuRepainted || !m_menuPresented || now - m_lastMenuPresent >= 1s) {
+                drawable = m_video.PresentMenu(m_menu.Pixels(), m_settings.frameGen != 0);
+                m_menuPresented = drawable;
+                m_lastMenuPresent = now;
+            }
         } else {
             if (buttons == 0) {
                 m_waitForRelease = false;

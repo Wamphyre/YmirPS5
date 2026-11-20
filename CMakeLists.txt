@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.28)
-project(Ymir VERSION 0.7.1)
+project(Ymir VERSION 0.7.2)
 
 # Workaround for a CMake issue involving Objective-C code: https://gitlab.kitware.com/cmake/cmake/-/work_items/24104
 if (APPLE)
@@ -18,6 +18,10 @@ if (PS5)
     # The SDK compiler wrappers supply the target triple and libc++ headers.
     # clang-scan-deps invokes the underlying compiler without those arguments.
     set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
+
+    # Every PS5 uses a Zen 2 CPU. Let the compiler use its full instruction set
+    # instead of only the generic x86-64 baseline plus the AVX2 flags below.
+    add_compile_options(-march=znver2 -mtune=znver2)
 endif ()
 
 include(cmake/CMakeRC.cmake)

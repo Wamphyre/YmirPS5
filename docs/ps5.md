@@ -1,6 +1,6 @@
 # Compilar YmirPS5
 
-La compilación de PS5 genera un único paquete instalable, `YmirPS5-0.7.1-PPSA98567.zip`. Vulkan forma parte del paquete. VideoOut proporciona una ruta de recuperación en tiempo de ejecución.
+La compilación de PS5 genera un único paquete instalable, `YmirPS5-0.7.2-PPSA98567.zip`. Vulkan forma parte del paquete. VideoOut proporciona una ruta de recuperación en tiempo de ejecución.
 
 ## Dependencias
 
@@ -20,7 +20,7 @@ git submodule update --init --recursive --jobs 4 \
 cmake -S . -B build/ps5 -G Ninja \
   -DCMAKE_TOOLCHAIN_FILE=/path/to/ps5-sdk/toolchain/prospero.cmake \
   -DCMAKE_BUILD_TYPE=Release \
-  -DYmir_DEV_BUILD=OFF -DYmir_ENABLE_IPO=OFF -DYmir_EXTRA_INLINING=OFF -DYmir_AVX2=ON \
+  -DYmir_DEV_BUILD=OFF -DYmir_ENABLE_IPO=ON -DYmir_EXTRA_INLINING=ON -DYmir_AVX2=ON \
   -DYmir_PS5_SWANSTATION_SOURCE=/path/to/native-title-sources \
   -DYmir_PS5_RADV_ROOT=/path/to/radv-release \
   -DYmir_PS5_RADV_SDK=/path/to/companion/ps5-payload-sdk
@@ -28,6 +28,8 @@ cmake --build build/ps5 --target ymir-ps5-zip
 ```
 
 La configuración descarga los encabezados de cereal 1.3.2. Para una compilación sin red, usa `-DFETCHCONTENT_SOURCE_DIR_YMIR_PS5_CEREAL=/path/to/cereal-1.3.2`.
+
+La build PS5 compila para la CPU Zen 2 de la consola con `-march=znver2 -mtune=znver2` y activa LTO/IPO e inlining agresivo. Es la configuración usada para el paquete de distribución.
 
 El ZIP aparece en `build/ps5/` y contiene la carpeta `PPSA98567`, con `eboot.bin`, `sce_module/libc.prx`, los recursos del dashboard en `sce_sys/` y los avisos de licencia. El icono del título se incrusta también en el menú. Si se compila con soporte de discos físicos, incluye el helper Lapy `lapy.elf` con su manifiesto, el ejecutable nativo `tools/ymir-ps5-disc.self` y la licencia MIT de Lapy.
 

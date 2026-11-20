@@ -1,5 +1,30 @@
 # Ymir changelog
 
+## YmirPS5 0.7.2
+
+Released 2026-11-20.
+
+### Fixes and improvements
+
+- Reduced stutter and slowdowns when streaming data and CD audio from USB optical drives:
+    - Seeks now prime the host read cache before reporting completion, so the emulation thread no longer blocks on the first sector after a seek.
+    - Cache misses preserve valid read-ahead instead of discarding the whole prefetch window; only real discontinuities restart it.
+    - Increased the read-ahead cache to 512 sectors and host read batches to 24 sectors.
+    - `SET CD SPEED` now works through the loopback optical service and is applied after the TOC and disc header are read.
+    - Reduced optical drive polling during playback.
+    - Added drive speed and read throughput diagnostics to `/data/YmirPS5/usb.log`.
+- Reduced menu CPU/GPU work: the 1920x1080 menu is uploaded only when it changes, with a slow heartbeat for device events.
+- PS5 distribution builds now target the console's Zen 2 CPU with `-march=znver2 -mtune=znver2`, LTO/IPO, and aggressive inlining.
+
+## YmirPS5 0.7.1
+
+Released 2026-11-20.
+
+- Added the dashboard artwork and *Cold Orbit* selection music.
+- Added audio settings and booting the Saturn BIOS without a disc.
+- Added the native optical service and etaHEN/Lapy sandbox elevation.
+- Improved USB CD streaming with 2352-byte reads, `SET CD SPEED`, and a larger prefetch window.
+
 ## YmirPS5 0.6.0
 
 - Installable PS5 title with Vulkan, FSR 1, FSR 3 frame generation, and a dashboard icon.

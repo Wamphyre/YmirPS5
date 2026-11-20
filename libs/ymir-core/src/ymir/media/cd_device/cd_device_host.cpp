@@ -26,6 +26,12 @@ namespace {
     constexpr uint32 kRawSectorSize = 2352;
     constexpr uint32 kRawSectorWithSubchannel = kRawSectorSize + 96;
 
+    // Read enough sectors during a seek to cover the first few CD Block ticks.
+    // The seek is reported as done only after this read completes, so the host
+    // seek latency is absorbed by the emulated seek instead of blocking the
+    // emulation thread on the first Play tick.
+    constexpr uint32 kSeekPrimeSectors = 8;
+
 #if defined(__PROSPERO__)
     // MMC READ CD returns the on-disc header and (for XA) the subheader before the payload.
     std::span<uint8> SectorUserData(std::span<uint8, kRawSectorSize> sector) {
@@ -229,20 +235,44 @@ auto HostCDDevice::GetCachedSector(uint32 frameAddress) -> std::shared_ptr<Secto
 
     // Not found in either cache
     return ExecuteInWorkerSync([&]() -> std::shared_ptr<SectorEntry> {
-        // Reconfigure prefetcher
-        StartPrefetcher(frameAddress + 1);
-        devlog::trace<grp::cache>("{:06X} cache miss", frameAddress);
+        // The worker may have finished prefetching this sector while the request
+        // was waiting in the queue. Check again before disturbing the prefetcher.
+        if (auto prefetched = m_sectorPrefetchCache.Get(frameAddress)) {
+            m_sectorCache.Put(frameAddress, prefetched);
+            m_sectorPrefetchCache.Evict(frameAddress);
+            devlog::trace<grp::cache>("{:06X} found in prefetch cache after wait", frameAddress);
+            return prefetched;
+        }
+
+        auto &ts = m_threadState;
+        const TrackInfo *track = ts.toc.GetTrackInfoForFAD(frameAddress);
+        const TrackInfo *prefetchTrack =
+            ts.readSectors ? ts.toc.GetTrackInfoForFAD(ts.nextSector) : nullptr;
+        // Restart the prefetcher only for a real discontinuity. A read behind
+        // the current run (for example, a game revisiting an earlier sector)
+        // must not throw away the look-ahead that is already buffered.
+        const bool startAtTarget = !ts.readSectors || track != prefetchTrack || frameAddress >= ts.nextSector;
+        if (startAtTarget) {
+            StartPrefetcher(frameAddress);
+        }
+        devlog::trace<grp::cache>("{:06X} cache miss{}", frameAddress,
+                                  startAtTarget ? " (prefetcher restarted)" : "");
 
         // Read sector
-        entry = std::make_shared<SectorEntry>(frameAddress);
-        if (!HostReadSectorForCache(frameAddress, *entry)) {
+        auto missed = std::make_shared<SectorEntry>(frameAddress);
+        if (!HostReadSectorForCache(frameAddress, *missed)) {
             devlog::trace<grp::cache>("{:06X} could not be read", frameAddress);
             return nullptr;
         }
-        m_sectorCache.Put(frameAddress, entry);
+        m_sectorCache.Put(frameAddress, missed);
+        if (startAtTarget) {
+            // The just-read sector is in the LRU cache, not in the prefetch
+            // cache; continue from the next sector.
+            ts.nextSector = frameAddress + 1;
+        }
         devlog::trace<grp::cache>("{:06X} cached in LRU cache; usage: {} of {}", frameAddress, m_sectorCache.Size(),
                                   m_sectorCache.GetCapacity());
-        return entry;
+        return missed;
     });
 }
 
@@ -290,11 +320,18 @@ void HostCDDevice::WorkerThread() {
     bool running = true;
     while (running) {
         // TODO: make this configurable
-        static constexpr uint32 kMaxSectorFetchSize = 16;
-        // Keep enough look-ahead for 2x CD data and audio. At 2x, 256 sectors
-        // cover about 1.7 seconds, which absorbs USB bridge latency spikes.
-        static constexpr uint32 kSectorPrefetchCapacity = 256;
-        const uint32 sectorFetchSize = kMaxSectorFetchSize;
+        // 24 raw sectors fit in the 64 KiB CAM transfer limit and reduce the
+        // number of USB commands by a third compared to the old 16-sector batch.
+        static constexpr uint32 kMaxSectorFetchSize = 24;
+        // Keep enough look-ahead for 2x CD data and audio. At 2x, 512 sectors
+        // cover about 3.4 seconds (6.8 seconds for 1x audio), which absorbs USB
+        // bridge latency spikes and short seeks without draining the cache.
+        static constexpr uint32 kSectorPrefetchCapacity = 512;
+        const size_t prefetched = m_sectorPrefetchCache.Size();
+        // After a seek only a small prime is buffered. Refill it in a small
+        // batch first so the next sectors arrive before the prime drains; once
+        // the cache is warmed up, use full-size USB transfers.
+        const uint32 sectorFetchSize = prefetched < 16 ? 8 : kMaxSectorFetchSize;
 
         // Refill only when a full batch fits. Reading one sector at a time as
         // soon as one is consumed multiplies USB command overhead and causes
@@ -303,7 +340,7 @@ void HostCDDevice::WorkerThread() {
             // actively reading sectors
             ts.readSectors &&
             // there's room for a whole batch
-            m_sectorPrefetchCache.Size() + sectorFetchSize <= kSectorPrefetchCapacity;
+            prefetched + sectorFetchSize <= kSectorPrefetchCapacity;
 
         const bool dequeued = shouldReadSectors ? m_workQueue.try_dequeue(m_ctokWorkQueue, cmd)
                                                 : m_workQueue.wait_dequeue_timed(m_ctokWorkQueue, cmd, 1s);
@@ -415,16 +452,11 @@ void HostCDDevice::InitializeWorkerDiscInfo() {
     std::unique_lock lock{ts.mtxDiscInfo};
 
     StopPrefetcher();
+    m_maxReadBatch = 24;
 #if defined(__PROSPERO__)
     m_useRawSubchannel = true;
 #endif
     if (ts.driveState == DriveState::MediaPresent) {
-        // USB drives spin data CDs slowly until asked for speed. Saturn FMV
-        // needs 2x continuously, so request the drive's maximum read speed.
-        const auto setSpeed = scsi::op::MakeSetCDSpeed();
-        uint32 speedReadSize{};
-        host::SendSCSIInCommand(m_devHandle, setSpeed, {}, speedReadSize);
-
         ts.toc.Clear();
         ts.toc.LoadFrom(HostReadTOC());
         std::array<uint8, 2352> headerSector{};
@@ -440,6 +472,18 @@ void HostCDDevice::InitializeWorkerDiscInfo() {
         } else {
             ts.header.Invalidate();
         }
+
+        // USB drives spin data CDs slowly until asked for speed. Saturn FMV
+        // needs 2x continuously, so request the drive's maximum read speed.
+        // Send this after the TOC/header reads: some bridges reject commands
+        // sent while the unit is still spinning up. The transport layer logs
+        // the result so a rejected SET CD SPEED is visible in usb.log.
+        const auto setSpeed = scsi::op::MakeSetCDSpeed();
+        uint32 speedReadSize{};
+        if (!host::SendSCSIInCommand(m_devHandle, setSpeed, {}, speedReadSize)) {
+            devlog::warn<grp::host>("Could not set the host drive to its maximum read speed");
+        }
+
         if (ts.fs.Read(m_fsReader)) {
             devlog::info<grp::host>("Filesystem built successfully");
         } else {
@@ -480,10 +524,25 @@ void HostCDDevice::ClearWorkerDiscInfo() {
 void HostCDDevice::SetSeekResult(uint32 counter, uint32 frameAddress) {
     auto &ts = m_threadState;
     ts.seekFAD.store(std::max(frameAddress, 150u), std::memory_order_release);
-    ts.seekCounter.store(counter, std::memory_order_release);
+
     if (frameAddress != 0xFFFFFF) {
         StartPrefetcher(frameAddress);
+
+        // Prime the cache before reporting the seek as done. This turns the
+        // physical seek and first USB read into emulated seek latency; the CD
+        // Block keeps polling IsSeekDone() without blocking the emulation
+        // thread. Without this, the first Play tick always took the synchronous
+        // cache-miss path and stalled the whole frame.
+        uint32 primed = 0;
+        if (HostPrefetchSectors(frameAddress, kSeekPrimeSectors, primed)) {
+            ts.nextSector = frameAddress + primed;
+        }
+        // If priming failed, leave nextSector at the target so the worker can
+        // retry once the drive is ready.
     }
+
+    // Report completion only after the target sectors are available.
+    ts.seekCounter.store(counter, std::memory_order_release);
 }
 
 void HostCDDevice::StartPrefetcher(uint32 frameAddress) {
@@ -746,12 +805,24 @@ bool HostCDDevice::HostPrefetchSectors(uint32 frameAddress, uint32 sectorCount, 
         return false;
     }
 
-    // Keep the request within one track (the last FAD is inclusive).
-    sectorCount = std::min(sectorCount, trackEnd - frameAddress + 1u);
+    // Keep the request within one track (the last FAD is inclusive) and within
+    // the batch size accepted by the active transport.
+    sectorCount = std::min(sectorCount, std::min(trackEnd - frameAddress + 1u, m_maxReadBatch));
     std::vector<uint8> data(kRawSectorWithSubchannel * sectorCount);
     uint32 sectorSize{};
     if (!HostReadSectors(frameAddress, sectorCount, data, sectorSize)) {
-        return false;
+        // A service binary from an older installation accepts at most 16
+        // sectors per READ CD. Retry the batch at that size and remember it
+        // instead of failing every subsequent prefetch.
+        if (sectorCount > 16) {
+            sectorCount = 16;
+            if (!HostReadSectors(frameAddress, sectorCount, data, sectorSize)) {
+                return false;
+            }
+            m_maxReadBatch = 16;
+        } else {
+            return false;
+        }
     }
 
     for (uint32 i = 0; i < sectorCount; ++i) {

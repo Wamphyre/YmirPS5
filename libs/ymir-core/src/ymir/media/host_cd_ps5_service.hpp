@@ -20,7 +20,7 @@ namespace ymir::media::host::ps5disc {
 inline constexpr std::string_view kDrivePath = "Local USB optical service";
 inline constexpr std::array<uint8, 8> kHello{'Y', 'M', 'I', 'R', 'D', 'I', 'S', 1};
 inline constexpr uint16 kPort = 42957;
-inline constexpr uint32 kMaxBatch = 16;
+inline constexpr uint32 kMaxBatch = 24;
 inline constexpr uint32 kMaxRead = kMaxBatch * 2448;
 inline constexpr size_t kMaxCDB = 12;
 
@@ -89,7 +89,7 @@ inline bool Send(int fd, std::span<const uint8> data) {
     return true;
 }
 
-inline bool IsReadCommand(std::span<const uint8> cdb, uint32 bytes) {
+inline bool IsSupportedCommand(std::span<const uint8> cdb, uint32 bytes) {
     if (cdb.empty() || bytes > kMaxRead) {
         return false;
     }
@@ -98,6 +98,12 @@ inline bool IsReadCommand(std::span<const uint8> cdb, uint32 bytes) {
         constexpr std::array<uint8, 6> testUnitReady{};
         return bytes == 0 && std::ranges::equal(cdb, testUnitReady);
     }
+    case scsi::op::kSetCDSpeed:
+        // The speed service must be able to change the drive speed too;
+        // otherwise a title using the loopback service stays at whatever
+        // default speed the bridge picked and cannot sustain 2x CD data.
+        return bytes == 0 && cdb.size() == 12 && cdb[1] == 0 && cdb[6] == 0 && cdb[7] == 0 && cdb[8] == 0 &&
+               cdb[9] == 0 && cdb[10] == 0 && cdb[11] == 0;
     case scsi::op::kReadTOC:
         return bytes == 2048 && std::ranges::equal(cdb, scsi::op::MakeReadTOC(bytes));
     case scsi::op::kRead10:

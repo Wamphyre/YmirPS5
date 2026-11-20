@@ -68,6 +68,11 @@ private:
     const CBOnMediaChanged &m_cbOnMediaChanged;
     std::string m_path; // for debugging purposes only
 
+    // Maximum READ CD batch accepted by the active transport. Older loopback
+    // service builds cap batches at 16 sectors; HostPrefetchSectors lowers this
+    // after a rejected transfer so the next reads do not fail repeatedly.
+    uint32 m_maxReadBatch = 24;
+
     DriveState m_driveState = DriveState::Unknown;
 
     struct SeekState {
