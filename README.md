@@ -1,55 +1,55 @@
-<p align="center"><img src="apps/ymir-ps5/assets/icon0.png" width="160" alt="Emblema de YmirPS5"></p>
+<p align="center"><img src="docs/images/ymirps5-logo.png" width="200" alt="YmirPS5 logo"></p>
 
 # YmirPS5
 
-YmirPS5 es un emulador de Sega Saturn para PlayStation 5. Es un port de [Ymir](https://github.com/ymir-emu/Ymir) con interfaz para DualSense, presentación Vulkan y soporte para CDs de Saturn en lectores ópticos USB.
+YmirPS5 is a Sega Saturn emulator for PlayStation 5. It is a port of [Ymir](https://github.com/ymir-emu/Ymir) with a DualSense interface, Vulkan presentation, and support for Saturn CDs in USB optical drives.
 
-## Instalación
+## Installation
 
-1. Extrae `YmirPS5-0.6.0-PPSA98567.zip` y copia la carpeta `PPSA98567` completa a la ubicación que escanea tu lanzador de homebrew. Si usa `/data/homebrew/`, el ejecutable quedará en `/data/homebrew/PPSA98567/eboot.bin`.
-2. Actualiza el listado del lanzador y abre **YmirPS5** desde Inicio. El primer arranque crea `/data/YmirPS5/` y las carpetas indicadas abajo, siempre que el lanzador permita escribir en esa ruta.
-3. Copia un volcado de tu BIOS de Sega Saturn, de **512 KiB (524 288 bytes)**, como `/data/YmirPS5/bios/bios.bin`. Puedes copiarlo mientras el menú está abierto. YmirPS5 vuelve a buscarlo al cargar un juego.
-4. Copia las imágenes a `/data/YmirPS5/games/` y elige **Game library**. Para un CD físico, conecta el lector óptico USB, inserta el disco y selecciona **Boot USB disc**.
+1. Extract `YmirPS5-0.6.0-PPSA98567.zip` and copy the entire `PPSA98567` folder to the location your homebrew launcher scans. If it uses `/data/homebrew/`, the executable will be at `/data/homebrew/PPSA98567/eboot.bin`.
+2. Refresh the launcher's app list and open **YmirPS5** from the PS5 home screen. On first launch, the emulator creates `/data/YmirPS5/` and the folders listed below if the launcher grants write access.
+3. Copy a **512 KiB (524,288 bytes)** Sega Saturn BIOS dump to `/data/YmirPS5/bios/bios.bin`. You can copy it while the menu is open. YmirPS5 checks for it again when you load a game.
+4. Copy your disc images to `/data/YmirPS5/games/` and select **Game library**. To play a physical CD, connect your USB optical drive, insert the disc, and select **Boot USB disc**.
 
-| Ruta dentro de `/data/YmirPS5/` | Contenido |
+| Path under `/data/YmirPS5/` | Contents |
 | --- | --- |
-| `bios/` | BIOS de Saturn, con el nombre `bios.bin` |
-| `games/` | Imágenes de disco y sus archivos asociados |
-| `covers/` | Carátulas personalizadas opcionales |
-| `states/` | Estados rápidos organizados por disco |
-| `backup.bin` | Memoria interna de Saturn |
-| `memory-transfer.bin` | Archivo para importar o exportar la memoria interna |
-| `video.cfg` | Preferencias de vídeo |
+| `bios/` | Saturn BIOS named `bios.bin` |
+| `games/` | Disc images and their companion files |
+| `covers/` | Optional custom box art |
+| `states/` | Save states organized by disc |
+| `backup.bin` | Saturn internal backup memory |
+| `memory-transfer.bin` | File for importing or exporting internal backup memory |
+| `video.cfg` | Video settings |
 
-Para instalaciones anteriores, también se busca la BIOS en `/data/YmirPS5/bios.bin` y `/download0/bios.bin`. Si usas la BIOS de `/download0/`, el emulador mantiene allí sus guardados siempre que pueda escribir en esa ubicación.
+For older installations, the emulator also looks for the BIOS at `/data/YmirPS5/bios.bin` and `/download0/bios.bin`. If you use the BIOS in `/download0/`, the emulator keeps its saves there as long as it has write access.
 
-## Jugar
+## Playing games
 
-- **Game library** muestra una cuadrícula con carátulas de Saturn que se consultan sin conexión. Busca coincidencias por título o por el número de serie de la imagen. Para añadir o sustituir una carátula, pon un `.png`, `.jpg` o `.jpeg` con el mismo nombre base que la imagen junto al juego o en `covers/`. [Carátulas de Libretro](https://github.com/libretro-thumbnails/Sega_-_Saturn/tree/c512bd123db1307f77b50383fb478b4ddb14fd20/Named_Boxarts)
-- La biblioteca admite CHD, BIN/CUE, IMG/CCD/SUB, MDF/MDS e ISO. Mantén los archivos asociados en la misma carpeta y abre el descriptor `.cue`, `.ccd` o `.mds`. Pulsa **○** desde la carpeta principal de juegos para cambiar de ubicación o explorar las unidades USB que exponga el lanzador.
-- **Boot USB disc** muestra una animación mientras detecta el lector y abre el disco. El lector debe estar disponible para la aplicación como dispositivo óptico a través de CAM. YmirPS5 puede leer pistas de datos y audio CD-DA.
-- **Video settings** permite elegir 1080p, 1440p o 2160p y ajustar la relación de aspecto. Con Vulkan puedes activar el escalado AMD FSR 1 y la generación de fotogramas FSR 3 en modos ×2 o ×4. La interpolación efectiva depende del juego, la pantalla y el modo de salida. Si falla Vulkan, YmirPS5 intenta continuar con VideoOut.
-- **Saved games** ofrece cinco ranuras de estado por disco identificado y herramientas para consultar, borrar, exportar e importar la memoria interna de Saturn.
+- **Game library** displays a grid of Saturn box art from an offline catalog. It matches disc images by title or serial number. To add or replace box art, put a `.png`, `.jpg`, or `.jpeg` with the same base name as the disc image next to it or in `covers/`. [Libretro box art](https://github.com/libretro-thumbnails/Sega_-_Saturn/tree/c512bd123db1307f77b50383fb478b4ddb14fd20/Named_Boxarts)
+- The library supports CHD, BIN/CUE, IMG/CCD/SUB, MDF/MDS, and ISO. Keep companion files in the same folder and open the `.cue`, `.ccd`, or `.mds` descriptor. Press **○** from the main games folder to switch locations or browse USB drives that the launcher makes available.
+- **Boot USB disc** shows an animation while the emulator detects the optical drive and opens the disc. The app must be able to access the drive through CAM. YmirPS5 can read data and CD-DA audio tracks.
+- **Video settings** lets you choose 1080p, 1440p, or 2160p and adjust the aspect ratio. Vulkan supports AMD FSR 1 upscaling and FSR 3 frame generation in ×2 or ×4 modes. The frame generation result depends on the game, the display, and the output mode. If Vulkan fails, YmirPS5 attempts to continue with VideoOut.
+- **Saved games** offers five save state slots per recognized disc and tools to browse, delete, export, and import Saturn internal backup memory.
 
-| DualSense | Menú | Sega Saturn |
+| DualSense | Menu | Sega Saturn |
 | --- | --- | --- |
-| × | Seleccionar o cambiar un ajuste | A |
-| ○ | Volver o reanudar desde la pausa | B |
-| □ | Abrir **Game library** desde el menú principal | X |
-| △ | Mostrar u ocultar los controles | Y |
-| Cruceta o stick izquierdo | Navegar | Cruceta |
-| L1 / R1 | Cambiar de página | Z / C |
+| × | Select or change a setting | A |
+| ○ | Go back or resume from pause | B |
+| □ | Open **Game library** from the main menu | X |
+| △ | Show or hide controls | Y |
+| D-pad or left stick | Navigate | D-pad |
+| L1 / R1 | Change pages | Z / C |
 | L2 / R2 | | L / R |
 | Options | | Start |
-| Panel táctil | Volver | Abrir el menú de pausa |
-| L3 + R3 | Cerrar YmirPS5 | Cerrar YmirPS5 |
+| Touchpad | Go back | Open the pause menu |
+| L3 + R3 | Exit YmirPS5 | Exit YmirPS5 |
 
-## Diagnóstico
+## Troubleshooting
 
-La barra lateral indica el estado de la BIOS y la ruta de los juegos. Puedes consultar el backend activo en **Video settings**. Si un CD físico aparece como no disponible, comprueba que el lanzador exponga tanto el lector como el acceso CAM. Si la consola detecta el disco y el emulador no lo identifica, captura las líneas que empiezan por `Ymir PS5:` en el registro de tu lanzador. El nombre del lector, la versión del firmware, el título del juego y el modo de vídeo ayudan a reproducir el problema.
+The sidebar shows the BIOS status and the games folder path. You can check the active graphics backend in **Video settings**. If a physical CD appears unavailable, check that the launcher exposes the drive and grants CAM access. If the console detects a disc that the emulator cannot identify, capture the lines starting with `Ymir PS5:` in your launcher's log. The optical drive model, firmware version, game title, and video mode help reproduce the issue.
 
-Consulta la [guía de compilación del paquete Vulkan](docs/ps5.md) para generar el ZIP desde el código fuente.
+To build the ZIP from source, see the [Vulkan package build guide](docs/ps5.md).
 
-## Licencia
+## License
 
-[GNU General Public License v3.0](LICENSE). El paquete incluye los avisos correspondientes a sus dependencias.
+[GNU General Public License v3.0](LICENSE). The package includes notices for its dependencies.
