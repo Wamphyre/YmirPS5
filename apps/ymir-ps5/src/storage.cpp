@@ -14,6 +14,7 @@
 #include <fcntl.h>
 #include <fstream>
 #include <ranges>
+#include <set>
 #include <unistd.h>
 
 namespace ps5 {
@@ -25,8 +26,8 @@ namespace {
     constexpr std::array<std::string_view, 5> kImageExtensions{".ccd", ".chd", ".cue", ".iso", ".mds"};
     constexpr uintmax_t kMaxStateSize = 32 * 1024 * 1024;
     const fs::path kDataDirectory{"/data/YmirPS5"};
+    const fs::path kGamesDirectory = kDataDirectory / "games";
     const fs::path kFallbackDirectory{"/download0"};
-    const fs::path kBiosPath = kDataDirectory / "bios" / "bios.bin";
 
     std::string Lower(std::string text) {
         for (char &c : text) {
@@ -39,6 +40,44 @@ namespace {
 
     bool IsImage(const fs::path &path) {
         return std::ranges::find(kImageExtensions, Lower(path.extension().string())) != kImageExtensions.end();
+    }
+
+    bool ReadGameIndex(const fs::path &directory, std::vector<ImageEntry> &entries) {
+        const auto relativeDirectory = directory.lexically_relative(kGamesDirectory);
+        if (relativeDirectory.empty() || *relativeDirectory.begin() == "..") {
+            return false;
+        }
+
+        std::ifstream index(kDataDirectory / "library.txt");
+        std::string line;
+        if (!std::getline(index, line) || line != "YMIRPS5_GAMES_1") {
+            return false;
+        }
+        std::vector<ImageEntry> indexed;
+        std::set<fs::path> added;
+        while (std::getline(index, line)) {
+            const fs::path game{line};
+            if (game.empty() || game.is_absolute() || std::ranges::find(game, fs::path("..")) != game.end() ||
+                !IsImage(game)) {
+                continue;
+            }
+            const auto relative = game.lexically_relative(relativeDirectory);
+            if (relative.empty() || *relative.begin() == ".." || relative == ".") {
+                continue;
+            }
+            const auto entry = directory / *relative.begin();
+            const bool folder = relative.has_parent_path();
+            std::error_code error;
+            const bool exists = folder ? fs::is_directory(entry, error) : fs::is_regular_file(entry, error);
+            if (exists && added.insert(entry).second) {
+                indexed.push_back({entry, folder});
+            }
+        }
+        if (index.bad()) {
+            return false;
+        }
+        entries = std::move(indexed);
+        return true;
     }
 
     template <typename Writer>
@@ -105,19 +144,24 @@ namespace {
 } // namespace
 
 fs::path FindBIOS() {
+    constexpr std::array names{kBIOSFilename, "bios.bin"};
     std::error_code error;
-    for (const auto &path : {kBiosPath, kDataDirectory / "bios.bin", kFallbackDirectory / "bios.bin"}) {
-        if (fs::is_regular_file(path, error)) {
-            return path;
+    for (const auto &directory : {fs::path{kBIOSDirectory}, kDataDirectory, kFallbackDirectory}) {
+        for (const auto *name : names) {
+            const auto path = directory / name;
+            if (fs::is_regular_file(path, error) && fs::file_size(path, error) == ymir::sys::kIPLSize &&
+                std::ifstream(path, std::ios::binary)) {
+                return path;
+            }
         }
     }
-    return kBiosPath;
+    return {};
 }
 
 std::vector<ImageEntry> ImageRoots() {
     std::vector<ImageEntry> roots;
     std::error_code error;
-    for (const auto &path : {kDataDirectory / "games", fs::path{"/app0/games"}, kFallbackDirectory / "games"}) {
+    for (const auto &path : {kGamesDirectory, fs::path{"/app0/games"}, kFallbackDirectory / "games"}) {
         if (fs::is_directory(path, error)) {
             roots.push_back({path, true});
         }
@@ -141,6 +185,9 @@ std::vector<ImageEntry> ListImages(const fs::path &path, std::error_code &error)
             files.push_back({it->path(), folder});
         }
     }
+    if (error && ReadGameIndex(path, files)) {
+        error.clear();
+    }
     std::ranges::sort(files, [](const auto &a, const auto &b) {
         if (a.folder != b.folder) {
             return a.folder;
@@ -160,7 +207,8 @@ Storage::Storage() {
         }
     }
 
-    const auto biosDirectory = FindBIOS().parent_path();
+    const auto bios = FindBIOS();
+    const auto biosDirectory = bios.empty() ? fs::path{kBIOSDirectory} : bios.parent_path();
     const bool dataWritable = CanWriteDirectory(kDataDirectory);
     if ((biosDirectory == kFallbackDirectory || !dataWritable) && CanWriteDirectory(kFallbackDirectory)) {
         m_root = kFallbackDirectory;
@@ -198,6 +246,63 @@ bool Storage::WriteVideoSettings(const VideoSettings &settings) const {
         out << "YMIRPS5_VIDEO_1\n"
             << unsigned(settings.resolution) << ' ' << unsigned(settings.aspect) << ' ' << settings.fsr << ' '
             << settings.frameGen << '\n';
+    });
+}
+
+AudioSettings Storage::ReadAudioSettings() const {
+    if (!m_root.empty()) {
+        std::ifstream in(m_root / "audio.cfg");
+        std::string magic;
+        unsigned gameVolume, menuVolume, mute;
+        if (in >> magic >> gameVolume >> menuVolume >> mute && magic == "YMIRPS5_AUDIO_1" &&
+            gameVolume <= 100 && menuVolume <= 100 && mute <= 1) {
+            return {gameVolume, menuVolume, mute != 0};
+        }
+    }
+    return {};
+}
+
+bool Storage::WriteAudioSettings(const AudioSettings &settings) const {
+    return !m_root.empty() && WriteAtomically(m_root / "audio.cfg", [&](std::ostream &out) {
+        out << "YMIRPS5_AUDIO_1\n"
+            << settings.gameVolume << ' ' << settings.menuVolume << ' ' << settings.mute << '\n';
+    });
+}
+
+bool Storage::ReadSystemSettings(ymir::smpc::PersistentSMPCData &settings) const {
+    if (m_root.empty()) {
+        return false;
+    }
+    std::ifstream in(m_root / "saturn.cfg");
+    std::string magic;
+    std::array<unsigned, 4> memory{};
+    unsigned initialized;
+    ymir::smpc::PersistentSMPCData saved{};
+    if (!(in >> magic >> memory[0] >> memory[1] >> memory[2] >> memory[3] >> initialized >>
+          saved.rtc.offset >> saved.rtc.timestamp) ||
+        magic != "YMIRPS5_SATURN_1" || initialized > 1 ||
+        std::ranges::any_of(memory, [](unsigned value) { return value > 255; })) {
+        return false;
+    }
+    // Discard corrupted values outside the range of the Saturn's four-digit year.
+    constexpr int64_t maxSeconds = 10'000LL * 366 * 24 * 60 * 60;
+    if (saved.rtc.offset < -maxSeconds || saved.rtc.offset > maxSeconds ||
+        saved.rtc.timestamp < -maxSeconds || saved.rtc.timestamp > maxSeconds) {
+        return false;
+    }
+    std::copy(memory.begin(), memory.end(), saved.SMEM.begin());
+    saved.STE = initialized != 0;
+    settings = saved;
+    return true;
+}
+
+bool Storage::WriteSystemSettings(const ymir::smpc::PersistentSMPCData &settings) const {
+    return !m_root.empty() && WriteAtomically(m_root / "saturn.cfg", [&](std::ostream &out) {
+        out << "YMIRPS5_SATURN_1\n";
+        for (const auto value : settings.SMEM) {
+            out << unsigned(value) << ' ';
+        }
+        out << settings.STE << ' ' << settings.rtc.offset << ' ' << settings.rtc.timestamp << '\n';
     });
 }
 

@@ -7,18 +7,27 @@
 
 namespace ymir {
 struct Saturn;
+namespace smpc {
+struct PersistentSMPCData;
+}
 }
 
 namespace ps5 {
 
 enum class Aspect { FourThree, SixteenNine, SixteenTen, Source, Count };
-enum class Resolution { HD, QHD, UHD, Count };
+enum class Resolution { HD, QHD, UHD, Native, Count };
 
 struct VideoSettings {
-    Resolution resolution = Resolution::HD;
+    Resolution resolution = Resolution::Native;
     Aspect aspect = Aspect::FourThree;
     bool fsr = false;
     unsigned frameGen = 0; // 0, 1, or 3 frames inserted between originals
+};
+
+struct AudioSettings {
+    unsigned gameVolume = 100;
+    unsigned menuVolume = 60;
+    bool mute = false;
 };
 
 struct ImageEntry {
@@ -26,6 +35,8 @@ struct ImageEntry {
     bool folder;
 };
 
+inline constexpr char kBIOSDirectory[] = "/data/YmirPS5/bios";
+inline constexpr char kBIOSFilename[] = "boot.bin";
 std::filesystem::path FindBIOS();
 std::vector<ImageEntry> ImageRoots();
 std::vector<ImageEntry> ListImages(const std::filesystem::path &path, std::error_code &error);
@@ -40,6 +51,10 @@ public:
 
     VideoSettings ReadVideoSettings() const;
     bool WriteVideoSettings(const VideoSettings &settings) const;
+    AudioSettings ReadAudioSettings() const;
+    bool WriteAudioSettings(const AudioSettings &settings) const;
+    bool ReadSystemSettings(ymir::smpc::PersistentSMPCData &settings) const;
+    bool WriteSystemSettings(const ymir::smpc::PersistentSMPCData &settings) const;
 
     std::filesystem::path StatePath(const ymir::Saturn &saturn, unsigned slot) const;
     bool SaveState(const ymir::Saturn &saturn, unsigned slot) const;

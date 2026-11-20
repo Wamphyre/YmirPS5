@@ -158,10 +158,11 @@ static bool stage_game(const uint32_t *pixels) {
     return true;
 }
 
-bool ymir_gpu_open(unsigned width, unsigned height, bool prefer120Hz, char *error, size_t size) {
+bool ymir_gpu_open(unsigned width, unsigned height, unsigned canvasWidth, unsigned canvasHeight, bool prefer120Hz,
+                   char *error, size_t size) {
     vkp_want_size(width, height);
     vkp_want_high_refresh(prefer120Hz);
-    if (!vkp_open(1280, 720, error, size)) {
+    if (!vkp_open(canvasWidth, canvasHeight, error, size)) {
         return false;
     }
     if (!vkp_ui_open(error, size)) {
@@ -174,6 +175,16 @@ bool ymir_gpu_open(unsigned width, unsigned height, bool prefer120Hz, char *erro
 void ymir_gpu_close(void) {
     release_upload();
     vkp_close();
+}
+
+bool ymir_gpu_resize(unsigned width, unsigned height) {
+    char error[256] = {0};
+    release_upload();
+    if (!vkp_set_mode(width, height, error, sizeof(error))) {
+        SwanStationPS5_log("Could not resize Vulkan output: %s", error);
+        return false;
+    }
+    return ymir_gpu_matches(width, height);
 }
 
 bool ymir_gpu_matches(unsigned width, unsigned height) {

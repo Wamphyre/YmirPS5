@@ -1,6 +1,6 @@
 # Compilar YmirPS5
 
-La compilación de PS5 genera un único paquete instalable, `YmirPS5-0.6.0-PPSA98567.zip`. Vulkan forma parte del paquete. VideoOut proporciona una ruta de recuperación en tiempo de ejecución.
+La compilación de PS5 genera un único paquete instalable, `YmirPS5-0.7.1-PPSA98567.zip`. Vulkan forma parte del paquete. VideoOut proporciona una ruta de recuperación en tiempo de ejecución.
 
 ## Dependencias
 
@@ -29,7 +29,15 @@ cmake --build build/ps5 --target ymir-ps5-zip
 
 La configuración descarga los encabezados de cereal 1.3.2. Para una compilación sin red, usa `-DFETCHCONTENT_SOURCE_DIR_YMIR_PS5_CEREAL=/path/to/cereal-1.3.2`.
 
-El ZIP aparece en `build/ps5/` y contiene la carpeta `PPSA98567`, con `eboot.bin`, `sce_sys/param.json`, `sce_sys/icon0.png`, `sce_module/libc.prx` y los avisos de licencia. El icono del título se incrusta también en el menú.
+El ZIP aparece en `build/ps5/` y contiene la carpeta `PPSA98567`, con `eboot.bin`, `sce_module/libc.prx`, los recursos del dashboard en `sce_sys/` y los avisos de licencia. El icono del título se incrusta también en el menú. Si se compila con soporte de discos físicos, incluye el helper Lapy `lapy.elf` con su manifiesto, el ejecutable nativo `tools/ymir-ps5-disc.self` y la licencia MIT de Lapy.
+
+El fondo original está en `apps/ymir-ps5/assets/dashboard.png`. La compilación copia su versión BC7 3840 × 2160 como `sce_sys/pic0.dds` para la selección y `sce_sys/pic1.dds` para el inicio. Incluye también `sce_sys/snd0.at9`, la versión en bucle ATRAC9 de *Cold Orbit*. La partitura y el sintetizador del tema están en `apps/ymir-ps5/tools/dashboard_music.py`.
+
+## Servicio del lector óptico
+
+`ymir-ps5-disc.self` arranca como un proceso nativo y verifica que su entorno ya puede abrir el lector CAM. Atiende a YmirPS5 en la interfaz local de la consola. Admite comprobación de presencia, lectura de la tabla de pistas y lectura de sectores con datos, audio o subcanales. El juego se ejecuta desde el CD y la precarga de sectores se mantiene en memoria.
+
+Al arrancar, YmirPS5 pide primero un jailbreak on-demand del título a etaHEN, OnionHEN, LegacyJB o PS5SX2 Helper. Si ninguno responde, envía el helper empaquetado `lapy.elf` al cargador ELF local en `127.0.0.1:9021`; ese helper Lapy está compilado específicamente para `PPSA98567` y completa el intercambio de credenciales con la app. Con el proceso ya elevado, YmirPS5 abre el lector USB directamente por CAM. Si ninguna de las dos rutas está disponible, usa el servicio `tools/ymir-ps5-disc.self` a través del mismo cargador y reintenta. También puedes iniciar ese servicio manualmente desde un entorno nativo con acceso CAM, esperar a `Ready for YmirPS5 on loopback` en `/data/YmirPS5/disc-service.log` y dejarlo en ejecución. Si la selección automática del lector falla, el servicio acepta la ruta del dispositivo CAM como único argumento. El resultado del jailbreak se escribe en `/data/YmirPS5/unlock.log`; los detalles del intento directo y del arranque automático, en `/data/YmirPS5/usb.log`.
 
 ## Incluir el catálogo de carátulas
 

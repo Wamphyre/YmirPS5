@@ -344,13 +344,14 @@ private:
     /// @param[out] outSector receives store sector data
     /// @param[out] outPos receives position data
     /// @return `true` if the sector was successfully read, `false` if not
-    bool HostReadSectorAndPosition(uint32 frameAddress, std::span<uint8, 2352> outSector, DiscPosition &outPos);
+    bool HostReadSectorAndPosition(uint32 frameAddress, std::span<uint8, 2352> outSector, DiscPosition &outPos,
+                                   bool needSubchannel = false);
 
     /// @brief Sends a command to the host device to read the sector's user data area.
     /// @param[in] frameAddress the frame address
     /// @param[out] outSector receives store sector data
     /// @return `true` if the sector was successfully read, `false` if not
-    bool HostReadSectorUserData(uint32 frameAddress, std::span<uint8, 2048> outSector) const;
+    bool HostReadSectorUserData(uint32 frameAddress, std::span<uint8, 2048> outSector);
 
     /// @brief Reads the raw sector and its position for cache storage.
     /// @param[in] frameAddress the frame address
@@ -358,12 +359,13 @@ private:
     /// @return `true` if the sector was successfully read, `false` if not
     bool HostReadSectorForCache(uint32 frameAddress, SectorEntry &outEntry);
 
-    bool HostReadSectors(uint32 frameAddress, uint32 sectorCount, std::span<uint8> buffer, uint32 &sectorSize);
+    bool HostReadSectors(uint32 frameAddress, uint32 sectorCount, std::span<uint8> buffer, uint32 &sectorSize,
+                         bool needSubchannel = false);
     DiscPosition DecodePosition(uint32 frameAddress, std::span<const uint8> sector) const;
 
 #if defined(__PROSPERO__)
     // Used only by the worker thread and reset whenever the medium changes.
-    bool m_useRawSubchannel = true;
+    bool m_useRawSubchannel = true; // the drive accepts raw P-W subchannel reads
 #endif
 
     /// @brief Prefetches and caches a number of sectors starting at the specified frame address.

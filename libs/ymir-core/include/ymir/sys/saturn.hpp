@@ -140,7 +140,7 @@ struct Saturn {
     /// @brief Connects to a host CD drive.
     /// @param path[in] the path to the host CD drive
     /// @return `true` if the device was opened successfully, `false` if there was an error
-    bool OpenHostCDDrive(std::string path);
+    bool OpenHostCDDrive(std::string path, bool requireSaturnDisc = false);
 
     /// @brief Ejects the disc from the CD drive.
     void EjectDisc();

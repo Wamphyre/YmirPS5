@@ -27,7 +27,14 @@ target_include_directories(ymir-ps5-ui PRIVATE
 )
 target_link_libraries(ymir-ps5-ui PUBLIC ymir::ymir-core PRIVATE ymir-ps5-assets)
 
-set(PS5_APP_SOURCES src/main.cpp src/platform.cpp src/video.cpp)
+set(PS5_APP_SOURCES src/lapy.cpp src/main.cpp src/platform.cpp src/unlock.cpp src/video.cpp)
 set(PS5_APP_LIBRARIES ymir-ps5-ui SceAudioOut ScePad SceUserService SceVideoOut kernel)
+if (Ymir_FF_HOST_CD_DRIVES)
+    list(APPEND PS5_APP_SOURCES src/disc_launcher.cpp)
+endif ()
 
 include(NativeTitle.cmake)
+
+if (Ymir_FF_HOST_CD_DRIVES)
+    target_include_directories(ymir-ps5-pie PRIVATE "${PROJECT_SOURCE_DIR}/libs/ymir-core/src")
+endif ()

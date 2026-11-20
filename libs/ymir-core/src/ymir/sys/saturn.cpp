@@ -245,14 +245,14 @@ void Saturn::LoadDisc(media::Disc &&disc) {
     AutodetectRegion();
 }
 
-bool Saturn::OpenHostCDDrive(std::string path) {
+bool Saturn::OpenHostCDDrive(std::string path, bool requireSaturnDisc) {
 #if defined(__PROSPERO__)
     // A USB optical drive can take several seconds to read its first sectors.
-    const bool opened = m_cdif.OpenHostDevice(path, std::chrono::seconds{10});
+    constexpr auto timeout = std::chrono::seconds{10};
 #else
-    const bool opened = m_cdif.OpenHostDevice(path);
+    constexpr auto timeout = std::chrono::seconds{1};
 #endif
-    if (opened) {
+    if (m_cdif.OpenHostDevice(path, timeout, requireSaturnDisc)) {
         AutodetectRegion();
         return true;
     }
@@ -260,8 +260,7 @@ bool Saturn::OpenHostCDDrive(std::string path) {
 }
 
 void Saturn::EjectDisc() {
-    if (m_cdif.HasDisc()) {
-        m_cdif.Eject();
+    if (m_cdif.Eject()) {
         m_fs.Clear();
         if (m_cdblockLLE) {
             CDDrive.OnDiscEjected();

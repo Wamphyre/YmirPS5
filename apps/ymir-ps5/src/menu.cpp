@@ -23,6 +23,13 @@ namespace ps5 {
 
 namespace {
 
+    // The layout is expressed in 1280x720 units. Primitives and fonts are rasterized at 1920x1080.
+    constexpr float kMenuScale = 1.5f;
+
+    constexpr int ToPixel(int coordinate) {
+        return coordinate * 3 / 2;
+    }
+
     constexpr uint32_t RGB(unsigned r, unsigned g, unsigned b) {
         return 0xff000000u | (b << 16) | (g << 8) | r;
     }
@@ -101,14 +108,14 @@ MenuCanvas::MenuCanvas()
     const auto resources = cmrc::ymir_ps5_assets::get_filesystem();
     const auto font = resources.open("SplineSans-Medium.ttf");
     const auto *data = reinterpret_cast<const unsigned char *>(font.begin());
-    m_title = std::make_unique<Font>(data, 53);
-    m_body = std::make_unique<Font>(data, 31);
-    m_small = std::make_unique<Font>(data, 22);
+    m_title = std::make_unique<Font>(data, 53 * kMenuScale);
+    m_body = std::make_unique<Font>(data, 31 * kMenuScale);
+    m_small = std::make_unique<Font>(data, 22 * kMenuScale);
 
     for (unsigned y = 0; y < kMenuHeight; ++y) {
         for (unsigned x = 0; x < kMenuWidth; ++x) {
-            const float dx = (float(x) - 1020) / 950;
-            const float dy = float(y) / 650;
+            const float dx = (float(x) / kMenuScale - 1020) / 950;
+            const float dy = float(y) / (650 * kMenuScale);
             const float glow = std::max(0.0f, 1 - dx * dx - dy * dy);
             m_pixels[y * kMenuWidth + x] = RGB(9 + 11 * glow, 13 + 19 * glow, 25 + 24 * glow);
         }
@@ -127,13 +134,7 @@ MenuCanvas::MenuCanvas()
     if (!pixels) {
         throw std::runtime_error("Could not open the YmirPS5 logo");
     }
-    constexpr int logoSize = 250;
-    for (int y = 0; y < logoSize; ++y) {
-        for (int x = 0; x < logoSize; ++x) {
-            const auto *pixel = pixels.get() + (y * height / logoSize * width + x * width / logoSize) * 3;
-            m_pixels[(87 + y) * kMenuWidth + 87 + x] = RGB(pixel[0], pixel[1], pixel[2]);
-        }
-    }
+    BlitRGB(pixels.get(), width, height, ToPixel(87), ToPixel(87), ToPixel(250), ToPixel(250));
     Text(87, 372, "YmirPS5", *m_title, kText, 250);
     Text(89, 401, "Sega Saturn emulator", *m_small, kDetail, 246);
     Text(89, 584, "Version " Ymir_VERSION, *m_small, kMuted, 246);
@@ -143,31 +144,46 @@ MenuCanvas::MenuCanvas()
 MenuCanvas::~MenuCanvas() = default;
 
 void MenuCanvas::Fill(int x, int y, int width, int height, uint32_t color) {
+    FillPixels(ToPixel(x), ToPixel(y), ToPixel(x + width) - ToPixel(x), ToPixel(y + height) - ToPixel(y), color);
+}
+
+void MenuCanvas::FillPixels(int x, int y, int width, int height, uint32_t color) {
     for (int row = y; row < y + height; ++row) {
         std::fill_n(m_pixels.data() + row * kMenuWidth + x, width, color);
     }
 }
 
 void MenuCanvas::RoundedRect(int x, int y, int width, int height, int radius, uint32_t color) {
+    width = ToPixel(x + width) - ToPixel(x);
+    height = ToPixel(y + height) - ToPixel(y);
+    x = ToPixel(x);
+    y = ToPixel(y);
+    radius = ToPixel(radius);
     for (int row = 0; row < radius; ++row) {
         const int distance = radius - row - 1;
         const int inset = radius - int(std::sqrt(radius * radius - distance * distance));
-        Fill(x + inset, y + row, width - 2 * inset, 1, color);
-        Fill(x + inset, y + height - row - 1, width - 2 * inset, 1, color);
+        FillPixels(x + inset, y + row, width - 2 * inset, 1, color);
+        FillPixels(x + inset, y + height - row - 1, width - 2 * inset, 1, color);
     }
-    Fill(x, y + radius, width, height - 2 * radius, color);
+    FillPixels(x, y + radius, width, height - 2 * radius, color);
 }
 
 void MenuCanvas::Line(float x0, float y0, float x1, float y1, uint32_t color) {
+    x0 *= kMenuScale;
+    y0 *= kMenuScale;
+    x1 *= kMenuScale;
+    y1 *= kMenuScale;
+    constexpr float stroke = 1.8f * kMenuScale;
+    constexpr int padding = 3;
     const float dx = x1 - x0;
     const float dy = y1 - y0;
     const float lengthSquared = dx * dx + dy * dy;
-    for (int y = int(std::min(y0, y1)) - 2; y <= int(std::max(y0, y1)) + 2; ++y) {
-        for (int x = int(std::min(x0, x1)) - 2; x <= int(std::max(x0, x1)) + 2; ++x) {
+    for (int y = int(std::min(y0, y1)) - padding; y <= int(std::max(y0, y1)) + padding; ++y) {
+        for (int x = int(std::min(x0, x1)) - padding; x <= int(std::max(x0, x1)) + padding; ++x) {
             const float px = x - x0;
             const float py = y - y0;
             const float t = std::clamp((px * dx + py * dy) / lengthSquared, 0.0f, 1.0f);
-            const float alpha = std::clamp(1.8f - std::hypot(px - t * dx, py - t * dy), 0.0f, 1.0f);
+            const float alpha = std::clamp(stroke - std::hypot(px - t * dx, py - t * dy), 0.0f, 1.0f);
             auto &pixel = m_pixels[y * kMenuWidth + x];
             pixel = Blend(pixel, color, unsigned(alpha * 255));
         }
@@ -183,10 +199,13 @@ void MenuCanvas::Icon(MenuIcon icon, int x, int y, uint32_t color) {
         line(left, bottom, left, top);
     };
     const auto circle = [&](int radius) {
-        for (int dy = -radius - 1; dy <= radius + 1; ++dy) {
-            for (int dx = -radius - 1; dx <= radius + 1; ++dx) {
-                const float alpha = std::clamp(1.8f - std::abs(std::hypot(float(dx), float(dy)) - radius), 0.0f, 1.0f);
-                auto &pixel = m_pixels[(y + dy) * kMenuWidth + x + dx];
+        radius = ToPixel(radius);
+        const int center = ToPixel(y) * kMenuWidth + ToPixel(x);
+        constexpr float stroke = 1.8f * kMenuScale;
+        for (int dy = -radius - 2; dy <= radius + 2; ++dy) {
+            for (int dx = -radius - 2; dx <= radius + 2; ++dx) {
+                const float alpha = std::clamp(stroke - std::abs(std::hypot(float(dx), float(dy)) - radius), 0.0f, 1.0f);
+                auto &pixel = m_pixels[center + dy * int(kMenuWidth) + dx];
                 pixel = Blend(pixel, color, unsigned(alpha * 255));
             }
         }
@@ -210,6 +229,15 @@ void MenuCanvas::Icon(MenuIcon icon, int x, int y, uint32_t color) {
         line(0, 4, 0, 8);
         line(-4, 8, 4, 8);
         break;
+    case MenuIcon::Audio:
+        rect(-8, -3, -4, 3);
+        line(-4, -3, 2, -8);
+        line(2, -8, 2, 8);
+        line(2, 8, -4, 3);
+        line(6, -4, 8, -1);
+        line(8, -1, 8, 1);
+        line(8, 1, 6, 4);
+        break;
     case MenuIcon::Save: rect(-7, -8, 7, 8); line(-4, -3, 4, -3); line(-4, 3, 4, 3); break;
     case MenuIcon::Exit:
         line(0, -8, 0, -1);
@@ -226,7 +254,10 @@ void MenuCanvas::Icon(MenuIcon icon, int x, int y, uint32_t color) {
 
 int MenuCanvas::Text(int x, int baseline, std::string_view text, const Font &font, uint32_t color, int maxWidth,
                      bool centered) {
-    const int end = x + maxWidth;
+    const int end = ToPixel(x + maxWidth);
+    x = ToPixel(x);
+    baseline = ToPixel(baseline);
+    maxWidth = end - x;
     const auto glyphFor = [&](uint32_t code) -> const Font::Glyph & {
         return font.glyphs[code >= 32 && code < font.glyphs.size() ? code : '?'];
     };
@@ -274,7 +305,7 @@ int MenuCanvas::Text(int x, int baseline, std::string_view text, const Font &fon
         draw(dot);
         draw(dot);
     }
-    return x - start;
+    return (x - start) * 2 / 3;
 }
 
 void MenuCanvas::DrawChrome(std::string_view page, std::string_view detail, std::string_view status, bool biosPresent,
@@ -283,7 +314,7 @@ void MenuCanvas::DrawChrome(std::string_view page, std::string_view detail, std:
     const uint32_t biosColor = biosPresent ? kAccent : kAmber;
     RoundedRect(89, 446, 9, 9, 4, biosColor);
     Text(109, 457, biosPresent ? "Saturn BIOS found" : "Saturn BIOS missing", *m_small, kText, 228);
-    Text(89, 489, biosPresent ? "BIOS  /  512 KiB" : "/data/YmirPS5/bios/bios.bin", *m_small, kDetail, 250);
+    Text(89, 489, biosPresent ? "BIOS  /  512 KiB" : "bios/boot.bin  /  512 KiB", *m_small, kDetail, 250);
     Text(89, 526, "Games folder", *m_small, kText, 246);
     Text(89, 552, "/data/YmirPS5/games/", *m_small, kDetail, 246);
 
@@ -343,15 +374,22 @@ void MenuCanvas::Draw(std::string_view page, std::string_view detail, std::span<
 }
 
 void MenuCanvas::DrawCover(const CoverImage &cover, int x, int y, int width, int height) {
+    x = ToPixel(x);
+    y = ToPixel(y);
+    width = ToPixel(width);
+    height = ToPixel(height);
     const double scale = std::min(double(width) / cover.width, double(height) / cover.height);
     const int targetWidth = std::max(1, int(cover.width * scale));
     const int targetHeight = std::max(1, int(cover.height * scale));
     x += (width - targetWidth) / 2;
     y += (height - targetHeight) / 2;
+    BlitRGB(cover.rgb.data(), cover.width, cover.height, x, y, targetWidth, targetHeight);
+}
+
+void MenuCanvas::BlitRGB(const uint8_t *pixels, int width, int height, int x, int y, int targetWidth, int targetHeight) {
     for (int row = 0; row < targetHeight; ++row) {
         for (int column = 0; column < targetWidth; ++column) {
-            const auto pixel = (row * cover.height / targetHeight * cover.width + column * cover.width / targetWidth) * 3;
-            const auto *rgb = cover.rgb.data() + pixel;
+            const auto *rgb = pixels + (row * height / targetHeight * width + column * width / targetWidth) * 3;
             m_pixels[(y + row) * kMenuWidth + x + column] = RGB(rgb[0], rgb[1], rgb[2]);
         }
     }
@@ -407,12 +445,12 @@ void MenuCanvas::DrawDiscLoading(double seconds) {
     constexpr float pi = std::numbers::pi_v<float>;
     constexpr int centerX = 640;
     constexpr int centerY = 305;
-    constexpr int radius = 98;
+    constexpr int radius = ToPixel(98);
     const float phase = float(std::fmod(seconds / 3.0, 1.0)) * 2 * pi;
 
     for (unsigned y = 0; y < kMenuHeight; ++y) {
-        const float glow = std::max(0.0f, 1 - std::abs(float(y) - centerY) / 390);
-        Fill(0, y, kMenuWidth, 1, RGB(10 + 6 * glow, 15 + 9 * glow, 26 + 16 * glow));
+        const float glow = std::max(0.0f, 1 - std::abs(float(y) / kMenuScale - centerY) / 390);
+        FillPixels(0, y, kMenuWidth, 1, RGB(10 + 6 * glow, 15 + 9 * glow, 26 + 16 * glow));
     }
 
     const auto orbit = [&](float angle, float size) -> std::array<float, 2> {
@@ -449,9 +487,9 @@ void MenuCanvas::DrawDiscLoading(double seconds) {
         for (int x = -extent; x <= extent; ++x) {
             const float surface = std::sqrt(float(std::max(0, radius * radius - x * x - y * y))) / radius;
             const float light = std::clamp(0.13f + 0.7f * surface - 0.45f * y / radius, 0.0f, 1.0f);
-            const float band = 0.5f + 0.5f * std::cos((y + 0.29f * x) * 0.135f);
+            const float band = 0.5f + 0.5f * std::cos((y + 0.29f * x) * (0.135f / kMenuScale));
             const auto color = Blend(RGB(14, 27, 53), RGB(81, 187, 227), unsigned(255 * light * (0.7f + 0.3f * band)));
-            m_pixels[(centerY + y) * kMenuWidth + centerX + x] = color;
+            m_pixels[(ToPixel(centerY) + y) * kMenuWidth + ToPixel(centerX) + x] = color;
         }
     }
     ring(0, 64);

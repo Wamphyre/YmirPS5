@@ -10,15 +10,15 @@
 
 namespace ps5 {
 
-inline constexpr unsigned kMenuWidth = 1280;
-inline constexpr unsigned kMenuHeight = 720;
+inline constexpr unsigned kMenuWidth = 1920;
+inline constexpr unsigned kMenuHeight = 1080;
 inline constexpr size_t kMenuVisibleRows = 7;
 inline constexpr size_t kLibraryColumns = 4;
 inline constexpr size_t kLibraryPageSize = kLibraryColumns * 2;
 
 struct CoverImage;
 
-enum class MenuIcon { None, Play, Disc, Folder, Video, Save, Exit, Cross, Circle, Square, Triangle, DPad };
+enum class MenuIcon { None, Play, Disc, Folder, Video, Audio, Save, Exit, Cross, Circle, Square, Triangle, DPad };
 
 struct MenuRow {
     std::string label;
@@ -51,6 +51,7 @@ private:
     struct Font;
 
     void Fill(int x, int y, int width, int height, uint32_t color);
+    void FillPixels(int x, int y, int width, int height, uint32_t color);
     void RoundedRect(int x, int y, int width, int height, int radius, uint32_t color);
     void Line(float x0, float y0, float x1, float y1, uint32_t color);
     void Icon(MenuIcon icon, int x, int y, uint32_t color);
@@ -59,6 +60,7 @@ private:
     void DrawChrome(std::string_view page, std::string_view detail, std::string_view status, bool biosPresent,
                     std::span<const MenuHint> hints);
     void DrawCover(const CoverImage &cover, int x, int y, int width, int height);
+    void BlitRGB(const uint8_t *rgb, int width, int height, int x, int y, int targetWidth, int targetHeight);
 
     std::vector<uint32_t> m_pixels;
     std::vector<uint32_t> m_background;

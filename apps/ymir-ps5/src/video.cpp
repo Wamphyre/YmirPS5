@@ -30,6 +30,12 @@ struct alignas(8) VideoAttribute {
     uint8_t data[80];
 };
 
+// The first word identifies the current HDMI output mode.
+struct alignas(8) VideoOutputStatus {
+    uint32_t resolution;
+    uint8_t reserved[76];
+};
+
 extern "C" {
 size_t sceKernelGetDirectMemorySize();
 int sceKernelAllocateDirectMemory(int64_t start, int64_t end, size_t size, size_t align, int type, int64_t *physical);
@@ -38,6 +44,7 @@ int sceKernelReleaseDirectMemory(int64_t physical, size_t size);
 
 int sceVideoOutOpen(int user, int bus, int index, const void *param);
 int sceVideoOutClose(int handle);
+int sceVideoOutGetOutputStatus(int handle, VideoOutputStatus *status);
 int sceVideoOutSetFlipRate(int handle, int rate);
 void sceVideoOutSetBufferAttribute2(VideoAttribute *attribute, uint64_t format, uint32_t tiling, uint32_t width,
                                     uint32_t height, uint64_t option, uint32_t dcc, uint64_t clearColor);
@@ -54,15 +61,18 @@ struct Size {
 };
 
 constexpr Size OutputSize(ps5::Resolution resolution) {
-    constexpr std::array<Size, 3> modes{{{1920, 1080}, {2560, 1440}, {3840, 2160}}};
-    return modes[unsigned(resolution)];
+    switch (resolution) {
+    case ps5::Resolution::QHD: return {2560, 1440};
+    case ps5::Resolution::UHD: return {3840, 2160};
+    default: return {ps5::kMenuWidth, ps5::kMenuHeight};
+    }
 }
 
 struct Rect {
     unsigned x, y, w, h;
 };
 
-Rect GameRect(Size output, Size input, ps5::Aspect aspect) {
+Rect GameRect(Size output, Size input, ps5::Aspect aspect, bool nativeScale) {
     Size ratio;
     switch (aspect) {
     case ps5::Aspect::SixteenNine: ratio = {16, 9}; break;
@@ -70,8 +80,12 @@ Rect GameRect(Size output, Size input, ps5::Aspect aspect) {
     case ps5::Aspect::Source: ratio = input.w && input.h ? input : Size{4, 3}; break;
     default: ratio = {4, 3}; break;
     }
-    const unsigned width = std::min(output.w, output.h * ratio.w / ratio.h);
-    const unsigned height = std::min(output.h, output.w * ratio.h / ratio.w);
+    unsigned width = std::min(output.w, output.h * ratio.w / ratio.h);
+    unsigned height = std::min(output.h, output.w * ratio.h / ratio.w);
+    if (nativeScale && input.h > 0 && height >= input.h) {
+        height -= height % input.h;
+        width = height * ratio.w / ratio.h;
+    }
     return {(output.w - width) / 2, (output.h - height) / 2, width, height};
 }
 constexpr size_t kDirectAlign = 0x200000;
@@ -87,6 +101,20 @@ bool CheckVideo(int result, const char *operation) {
     std::snprintf(message, sizeof(message), "%s failed (0x%08x)", operation, static_cast<unsigned>(result));
     ps5::Report(message);
     return false;
+}
+
+ps5::Resolution DetectSystemResolution() {
+    constexpr uint32_t kOutput2160p = 2;
+    const int handle = sceVideoOutOpen(0xff, 0, 0, nullptr);
+    if (!CheckVideo(handle, "Opening VideoOut to detect the PS5 output mode")) {
+        return ps5::Resolution::HD;
+    }
+    VideoOutputStatus status{};
+    const int result = sceVideoOutGetOutputStatus(handle, &status);
+    sceVideoOutClose(handle);
+    return CheckVideo(result, "sceVideoOutGetOutputStatus") && status.resolution == kOutput2160p
+               ? ps5::Resolution::UHD
+               : ps5::Resolution::HD;
 }
 
 } // namespace
@@ -133,7 +161,7 @@ bool Video::OpenGPU(Resolution resolution, bool prefer120Hz) {
     // Try the requested size again at the default refresh when that happens.
     for (int i = 0; i < (prefer120Hz ? 2 : 1); ++i) {
         char error[256]{};
-        if (!ymir_gpu_open(width, height, prefer120Hz && i == 0, error, sizeof(error))) {
+        if (!ymir_gpu_open(width, height, kMenuWidth, kMenuHeight, prefer120Hz && i == 0, error, sizeof(error))) {
             Report(error);
             continue;
         }
@@ -163,22 +191,30 @@ bool Video::RecoverCPU() {
     return previous != Resolution::HD && OpenCPU(Resolution::HD);
 }
 
-bool Video::Open(VideoSettings &settings) {
-    m_resolution = settings.resolution;
-    if (OpenGPU(settings.resolution, settings.frameGen != 0)) {
+bool Video::Open(const VideoSettings &settings) {
+    m_systemResolution = DetectSystemResolution();
+    m_requestedResolution = m_systemResolution;
+    m_resolution = m_systemResolution;
+    const bool prefer120Hz = settings.frameGen != 0;
+    m_requested120Hz = prefer120Hz;
+    if (OpenGPU(m_resolution, prefer120Hz) ||
+        (m_resolution != Resolution::HD && OpenGPU(Resolution::HD, prefer120Hz))) {
         return true;
     }
-    if (settings.resolution != Resolution::HD && OpenGPU(Resolution::HD, settings.frameGen != 0)) {
-        settings.resolution = Resolution::HD;
-        return true;
+    m_requested120Hz = false;
+    return RecoverCPU();
+}
+
+bool Video::SelectOutput(Resolution resolution, bool prefer120Hz) {
+    prefer120Hz = m_gpu && prefer120Hz;
+    if (resolution != m_requestedResolution || prefer120Hz != m_requested120Hz) {
+        m_requestedResolution = resolution;
+        m_requested120Hz = prefer120Hz;
+        if (!SetOutput(resolution, prefer120Hz)) {
+            Report("The requested video mode is unavailable");
+        }
     }
-    settings.fsr = false;
-    settings.frameGen = 0;
-    if (!RecoverCPU()) {
-        return false;
-    }
-    settings.resolution = m_resolution;
-    return true;
+    return m_gpu || m_bufferSet >= 0;
 }
 
 bool Video::SetOutput(Resolution resolution, bool prefer120Hz) {
@@ -189,6 +225,16 @@ bool Video::SetOutput(Resolution resolution, bool prefer120Hz) {
     const Resolution previousResolution = m_resolution;
     const bool previousRefresh = m_prefer120Hz;
     const bool wasGpu = m_gpu;
+#if YMIR_PS5_GPU
+    if (wasGpu && prefer120Hz == previousRefresh) {
+        const auto [width, height] = OutputSize(resolution);
+        if (ymir_gpu_resize(width, height)) {
+            m_resolution = resolution;
+            m_uploadPending = true;
+            return true;
+        }
+    }
+#endif
     Close();
     if (wasGpu) {
         if (OpenGPU(resolution, prefer120Hz)) {
@@ -296,6 +342,10 @@ void Video::ClearGameFrame() {
 }
 
 bool Video::PresentGame(const VideoSettings &settings, bool emulatedFrame, double coreHz) {
+    const bool nativeScale = settings.resolution == Resolution::Native;
+    if (!SelectOutput(nativeScale ? m_systemResolution : settings.resolution, settings.frameGen != 0)) {
+        return false;
+    }
     bool changed = false;
     {
         const std::lock_guard lock{m_frameMutex};
@@ -309,11 +359,14 @@ bool Video::PresentGame(const VideoSettings &settings, bool emulatedFrame, doubl
     const auto &[pixels, width, height] = m_displayFrame;
 #if YMIR_PS5_GPU
     if (m_gpu) {
-        const auto rect = GameRect({kMenuWidth, kMenuHeight}, {width, height}, settings.aspect);
+        const auto output = OutputSize(m_resolution);
+        const auto rect = GameRect(output, {width, height}, settings.aspect, nativeScale);
+        const float scaleX = float(kMenuWidth) / output.w;
+        const float scaleY = float(kMenuHeight) / output.h;
         const bool upload = !pixels.empty() && (changed || m_uploadPending);
         m_uploadPending = false;
-        if (ymir_gpu_game(pixels.data(), width, height, upload, emulatedFrame, rect.x, rect.y, rect.w, rect.h,
-                          settings.fsr, settings.frameGen, coreHz)) {
+        if (ymir_gpu_game(pixels.data(), width, height, upload, emulatedFrame, rect.x * scaleX, rect.y * scaleY,
+                          rect.w * scaleX, rect.h * scaleY, !nativeScale && settings.fsr, settings.frameGen, coreHz)) {
             return true;
         }
         Report("Vulkan could not present the game; switching to VideoOut");
@@ -325,10 +378,13 @@ bool Video::PresentGame(const VideoSettings &settings, bool emulatedFrame, doubl
     (void)emulatedFrame;
     (void)coreHz;
 #endif
-    return pixels.empty() || PresentCPU(pixels, width, height, settings.aspect);
+    return pixels.empty() || PresentCPU(pixels, width, height, settings.aspect, nativeScale);
 }
 
-bool Video::PresentMenu(std::span<const uint32_t> pixels) {
+bool Video::PresentMenu(std::span<const uint32_t> pixels, bool prefer120Hz) {
+    if (!SelectOutput(m_systemResolution, prefer120Hz)) {
+        return false;
+    }
 #if YMIR_PS5_GPU
     if (m_gpu) {
         if (ymir_gpu_menu(pixels.data())) {
@@ -340,10 +396,11 @@ bool Video::PresentMenu(std::span<const uint32_t> pixels) {
         }
     }
 #endif
-    return PresentCPU(pixels, kMenuWidth, kMenuHeight, Aspect::SixteenNine);
+    return PresentCPU(pixels, kMenuWidth, kMenuHeight, Aspect::SixteenNine, false);
 }
 
-bool Video::PresentCPU(std::span<const uint32_t> pixels, unsigned width, unsigned height, Aspect aspect) {
+bool Video::PresentCPU(std::span<const uint32_t> pixels, unsigned width, unsigned height, Aspect aspect,
+                       bool nativeScale) {
     // Keep at most one submitted flip in the queue.
     const int pending = sceVideoOutIsFlipPending(m_handle);
     if (!CheckVideo(pending, "sceVideoOutIsFlipPending")) {
@@ -355,7 +412,7 @@ bool Video::PresentCPU(std::span<const uint32_t> pixels, unsigned width, unsigne
 
     auto *destination = m_memory + size_t(m_nextBuffer) * (m_frameBytes / sizeof(uint32_t));
     const auto output = OutputSize(m_resolution);
-    const Rect rect = GameRect(output, {width, height}, aspect);
+    const Rect rect = GameRect(output, {width, height}, aspect, nativeScale);
     std::array<unsigned, 3840> sourceX{};
     std::array<size_t, 2160> sourceRow{};
     for (unsigned x = 0; x < rect.w; ++x) {

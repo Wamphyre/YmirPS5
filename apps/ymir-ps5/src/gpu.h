@@ -9,8 +9,10 @@
 extern "C" {
 #endif
 
-bool ymir_gpu_open(unsigned width, unsigned height, bool prefer120Hz, char *error, size_t size);
+bool ymir_gpu_open(unsigned width, unsigned height, unsigned canvasWidth, unsigned canvasHeight, bool prefer120Hz,
+                   char *error, size_t size);
 void ymir_gpu_close(void);
+bool ymir_gpu_resize(unsigned width, unsigned height);
 bool ymir_gpu_matches(unsigned width, unsigned height);
 const char *ymir_gpu_description(void);
 double ymir_gpu_refresh(void);

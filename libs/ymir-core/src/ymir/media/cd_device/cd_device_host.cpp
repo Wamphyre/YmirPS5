@@ -26,6 +26,21 @@ namespace {
     constexpr uint32 kRawSectorSize = 2352;
     constexpr uint32 kRawSectorWithSubchannel = kRawSectorSize + 96;
 
+#if defined(__PROSPERO__)
+    // MMC READ CD returns the on-disc header and (for XA) the subheader before the payload.
+    std::span<uint8> SectorUserData(std::span<uint8, kRawSectorSize> sector) {
+        if (HasValidSyncBytes(sector)) {
+            if (sector[15] == 1) {
+                return sector.subspan<16, 2048>();
+            }
+            if (sector[15] == 2 && (sector[18] & 0x20) == 0) { // Mode 2 Form 1
+                return sector.subspan<24, 2048>();
+            }
+        }
+        return {};
+    }
+#endif
+
 } // namespace
 
 namespace grp {
@@ -155,7 +170,15 @@ uint32 HostCDDevice::ReadSectorUserDataImpl(uint32 frameAddress, std::span<uint8
         return 0u;
     }
 
+#if defined(__PROSPERO__)
+    const auto data = SectorUserData(entry->sector);
+    if (data.empty()) {
+        return 0;
+    }
+    std::ranges::copy(data, outSector.begin());
+#else
     std::copy_n(entry->sector.begin() + 0x10, outSector.size(), outSector.begin());
+#endif
     return outSector.size();
 }
 
@@ -268,15 +291,19 @@ void HostCDDevice::WorkerThread() {
     while (running) {
         // TODO: make this configurable
         static constexpr uint32 kMaxSectorFetchSize = 16;
-        static constexpr uint32 kSectorPrefetchCapacity = 32;
-        const uint32 sectorFetchSize =
-            std::min<size_t>(kMaxSectorFetchSize, kSectorPrefetchCapacity - m_sectorPrefetchCache.Size());
+        // Keep enough look-ahead for 2x CD data and audio. At 2x, 256 sectors
+        // cover about 1.7 seconds, which absorbs USB bridge latency spikes.
+        static constexpr uint32 kSectorPrefetchCapacity = 256;
+        const uint32 sectorFetchSize = kMaxSectorFetchSize;
 
+        // Refill only when a full batch fits. Reading one sector at a time as
+        // soon as one is consumed multiplies USB command overhead and causes
+        // exactly the stutter this cache is meant to avoid.
         const bool shouldReadSectors =
             // actively reading sectors
             ts.readSectors &&
-            // there's enough room in cache
-            sectorFetchSize > 0;
+            // there's room for a whole batch
+            m_sectorPrefetchCache.Size() + sectorFetchSize <= kSectorPrefetchCapacity;
 
         const bool dequeued = shouldReadSectors ? m_workQueue.try_dequeue(m_ctokWorkQueue, cmd)
                                                 : m_workQueue.wait_dequeue_timed(m_ctokWorkQueue, cmd, 1s);
@@ -319,7 +346,7 @@ void HostCDDevice::WorkerThread() {
                             std::array<uint8, 2352> sectorBuffer{};
                             DiscPosition pos{};
                             while (lbFAD != ubFAD) {
-                                if (!HostReadSectorAndPosition(frameAddress, sectorBuffer, pos)) {
+                                if (!HostReadSectorAndPosition(frameAddress, sectorBuffer, pos, true)) {
                                     // Read failed
                                     frameAddress = 0xFFFFFF;
                                     break;
@@ -374,8 +401,7 @@ void HostCDDevice::WorkerThread() {
         const DriveState prevDriveState = ts.driveState;
         ts.driveState = host::PollDriveState(m_devHandle);
 
-        if (prevDriveState != ts.driveState &&
-            (prevDriveState == DriveState::MediaPresent || ts.driveState == DriveState::MediaPresent)) {
+        if (prevDriveState != ts.driveState) {
             InitializeWorkerDiscInfo();
         }
     }
@@ -393,12 +419,24 @@ void HostCDDevice::InitializeWorkerDiscInfo() {
     m_useRawSubchannel = true;
 #endif
     if (ts.driveState == DriveState::MediaPresent) {
+        // USB drives spin data CDs slowly until asked for speed. Saturn FMV
+        // needs 2x continuously, so request the drive's maximum read speed.
+        const auto setSpeed = scsi::op::MakeSetCDSpeed();
+        uint32 speedReadSize{};
+        host::SendSCSIInCommand(m_devHandle, setSpeed, {}, speedReadSize);
+
         ts.toc.Clear();
         ts.toc.LoadFrom(HostReadTOC());
         std::array<uint8, 2352> headerSector{};
         DiscPosition pos{};
         if (HostReadSectorAndPosition(150u, headerSector, pos)) {
+#if defined(__PROSPERO__)
+            if (!ts.header.ReadFrom(SectorUserData(headerSector))) {
+                ts.header.Invalidate();
+            }
+#else
             ts.header.ReadFrom(std::span{headerSector}.subspan(0x10));
+#endif
         } else {
             ts.header.Invalidate();
         }
@@ -590,7 +628,7 @@ std::vector<TOCEntry> HostCDDevice::HostReadTOC() const {
 }
 
 bool HostCDDevice::HostReadSectors(uint32 frameAddress, uint32 sectorCount, std::span<uint8> buffer,
-                                   uint32 &sectorSize) {
+                                   uint32 &sectorSize, bool needSubchannel) {
     if (frameAddress < 150 || sectorCount == 0) {
         return false;
     }
@@ -616,17 +654,19 @@ bool HostCDDevice::HostReadSectors(uint32 frameAddress, uint32 sectorCount, std:
     };
 
 #if defined(__PROSPERO__)
-    if (m_useRawSubchannel && read(1, kRawSectorWithSubchannel)) {
-        return true;
-    }
-    // Raw P-W subchannel reads are optional. The TOC can supply index 1
-    // position information for drives that only support raw sector data.
-    if (m_threadState.toc.GetTrackInfoForFAD(frameAddress) != nullptr && read(0, kRawSectorSize)) {
+    // Raw P-W subchannel reads are optional and many USB bridges execute them
+    // at 1x, far below the speed needed for FMV. Stream plain 2352-byte sectors
+    // and synthesize positions from the TOC; only ask for real subchannel data
+    // when a track index search needs it.
+    if (needSubchannel && m_useRawSubchannel) {
+        if (read(1, kRawSectorWithSubchannel)) {
+            return true;
+        }
         m_useRawSubchannel = false;
-        return true;
     }
-    return false;
+    return read(0, kRawSectorSize);
 #else
+    (void)needSubchannel;
     return read(1, kRawSectorWithSubchannel);
 #endif
 }
@@ -662,10 +702,10 @@ DiscPosition HostCDDevice::DecodePosition(uint32 frameAddress, std::span<const u
 }
 
 bool HostCDDevice::HostReadSectorAndPosition(uint32 frameAddress, std::span<uint8, 2352> outSector,
-                                             DiscPosition &outPos) {
+                                             DiscPosition &outPos, bool needSubchannel) {
     std::array<uint8, kRawSectorWithSubchannel> data{};
     uint32 sectorSize{};
-    if (!HostReadSectors(frameAddress, 1, data, sectorSize)) {
+    if (!HostReadSectors(frameAddress, 1, data, sectorSize, needSubchannel)) {
         return false;
     }
     std::copy_n(data.begin(), outSector.size(), outSector.begin());
@@ -673,10 +713,22 @@ bool HostCDDevice::HostReadSectorAndPosition(uint32 frameAddress, std::span<uint
     return true;
 }
 
-bool HostCDDevice::HostReadSectorUserData(uint32 frameAddress, std::span<uint8, 2048> outSector) const {
+bool HostCDDevice::HostReadSectorUserData(uint32 frameAddress, std::span<uint8, 2048> outSector) {
     if (frameAddress < 150) {
         return false;
     }
+#if defined(__PROSPERO__)
+    // The same raw transfer used during play also works on USB bridges without cooked reads.
+    std::array<uint8, kRawSectorWithSubchannel> raw{};
+    uint32 sectorSize{};
+    if (HostReadSectors(frameAddress, 1, raw, sectorSize)) {
+        const auto data = SectorUserData(std::span{raw}.first<kRawSectorSize>());
+        if (!data.empty()) {
+            std::ranges::copy(data, outSector.begin());
+            return true;
+        }
+    }
+#endif
     const auto cdb = scsi::op::MakeRead10(frameAddress - 150u, 1);
     uint32 readSize{};
     return host::SendSCSIInCommand(m_devHandle, cdb, outSector, readSize) && readSize == outSector.size();

@@ -19,13 +19,9 @@ class Video {
 public:
     ~Video();
 
-    bool Open(VideoSettings &settings);
-    bool SetOutput(Resolution resolution, bool prefer120Hz);
+    bool Open(const VideoSettings &settings);
     bool HasGpu() const {
         return m_gpu;
-    }
-    Resolution OutputResolution() const {
-        return m_resolution;
     }
     double DisplayHz() const;
     std::string Description() const;
@@ -33,14 +29,17 @@ public:
     void CopyFrame(const uint32_t *pixels, uint32_t width, uint32_t height);
     void ClearGameFrame();
     bool PresentGame(const VideoSettings &settings, bool emulatedFrame, double coreHz);
-    bool PresentMenu(std::span<const uint32_t> pixels);
+    bool PresentMenu(std::span<const uint32_t> pixels, bool prefer120Hz);
 
 private:
     bool OpenCPU(Resolution resolution);
     bool OpenGPU(Resolution resolution, bool prefer120Hz);
     bool RecoverCPU();
+    bool SelectOutput(Resolution resolution, bool prefer120Hz);
+    bool SetOutput(Resolution resolution, bool prefer120Hz);
     void Close();
-    bool PresentCPU(std::span<const uint32_t> pixels, unsigned width, unsigned height, Aspect aspect);
+    bool PresentCPU(std::span<const uint32_t> pixels, unsigned width, unsigned height, Aspect aspect,
+                    bool nativeScale);
     static constexpr int kBufferCount = 3;
     static constexpr unsigned kTileSize = 128;
 
@@ -52,6 +51,9 @@ private:
 
     bool m_gpu = false;
     bool m_prefer120Hz = false;
+    bool m_requested120Hz = false;
+    Resolution m_systemResolution = Resolution::HD;
+    Resolution m_requestedResolution = Resolution::HD;
     Resolution m_resolution = Resolution::HD;
     size_t m_frameBytes = 0;
     bool m_uploadPending = false;
@@ -100,6 +102,8 @@ private:
     bool m_userService = false;
 };
 
+enum class MenuSound { Navigate, Confirm, Back };
+
 class Audio {
 public:
     ~Audio();
@@ -107,6 +111,8 @@ public:
     bool Open();
     void PushSample(int16_t left, int16_t right);
     void Clear();
+    void SetSettings(const AudioSettings &settings);
+    void PlayMenuSound(MenuSound sound);
 
 private:
     static constexpr unsigned kGrainSize = 256;
@@ -125,6 +131,8 @@ private:
     std::mutex m_mutex;
     std::condition_variable m_ready;
     std::array<Grain, 8> m_queue{};
+    AudioSettings m_settings;
+    std::span<const int16_t> m_menuSound;
     unsigned m_head = 0;
     unsigned m_count = 0;
     bool m_stopping = false;

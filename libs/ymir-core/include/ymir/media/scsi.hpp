@@ -34,6 +34,9 @@ namespace op {
     /// @brief SCSI operation code for READ CD
     inline constexpr uint8 kReadCD = 0xBE;
 
+    /// @brief SCSI operation code for SET CD SPEED
+    inline constexpr uint8 kSetCDSpeed = 0xBB;
+
     /// @brief Builds an INQUIRY command descriptor block without requesting vital product data.
     /// @param[in] length size of the output buffer
     /// @return an array with the command descriptor block for an INQUIRY command built from the given parameters
@@ -92,6 +95,20 @@ namespace op {
         cdb[7] = bit::extract<8, 15>(length);
         cdb[8] = bit::extract<0, 7>(length);
         cdb[9] = 0x00;
+        return cdb;
+    }
+
+    /// @brief Builds a SET CD SPEED command descriptor block.
+    /// @param[in] readSpeed requested read speed in kB/s; 0xFFFF asks for the maximum
+    /// @param[in] writeSpeed requested write speed in kB/s; 0xFFFF leaves it unchanged
+    /// @return an array with the command descriptor block for a SET CD SPEED command
+    inline std::array<uint8, 12> MakeSetCDSpeed(uint16 readSpeed = 0xFFFF, uint16 writeSpeed = 0xFFFF) {
+        std::array<uint8, 12> cdb{};
+        cdb[0] = kSetCDSpeed;
+        cdb[2] = bit::extract<8, 15>(readSpeed);
+        cdb[3] = bit::extract<0, 7>(readSpeed);
+        cdb[4] = bit::extract<8, 15>(writeSpeed);
+        cdb[5] = bit::extract<0, 7>(writeSpeed);
         return cdb;
     }
 

@@ -14,9 +14,13 @@ void CDInterface::LoadDisc(Disc &&disc) {
     m_cbOnMediaChanged();
 }
 
-bool CDInterface::OpenHostDevice(std::string path, std::chrono::milliseconds timeout) {
+bool CDInterface::OpenHostDevice(std::string path, std::chrono::milliseconds timeout, bool requireSaturnDisc) {
     auto dev = std::make_unique<HostCDDevice>(path, timeout, m_cbOnMediaChanged);
     if (!dev || !dev->IsConnected()) {
+        return false;
+    }
+
+    if (requireSaturnDisc && (!dev->HasDisc() || dev->GetTOC().GetTable().empty() || !dev->GetDiscHeader().IsValid())) {
         return false;
     }
 
@@ -25,9 +29,13 @@ bool CDInterface::OpenHostDevice(std::string path, std::chrono::milliseconds tim
     return true;
 }
 
-void CDInterface::Eject() {
+bool CDInterface::Eject() {
+    if (dynamic_cast<const NullCDDevice *>(m_cdDevice.get())) {
+        return false;
+    }
     m_cdDevice = std::make_unique<NullCDDevice>();
     m_cbOnMediaChanged();
+    return true;
 }
 
 DriveState CDInterface::PollDriveState() const {

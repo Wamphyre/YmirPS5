@@ -4,6 +4,10 @@
 
 #include "covers.hpp"
 #include "menu.hpp"
+#include "unlock.hpp"
+#if Ymir_FF_HOST_CD_DRIVES
+#include "disc_launcher.hpp"
+#endif
 
 #include <ymir/media/host_cd.hpp>
 #include <ymir/media/loader/loader.hpp>
@@ -13,12 +17,16 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <future>
 #include <memory>
 #include <string_view>
+
+extern "C" int sceSystemServiceHideSplashScreen();
+extern "C" int sceSystemServiceLoadExec(const char *path, const char **arguments);
 
 namespace {
 
@@ -27,6 +35,16 @@ using Button = ymir::peripheral::Button;
 using ymir::media::DriveState;
 using ps5::MenuHint;
 using ps5::MenuIcon;
+
+constexpr char kUSBLogPath[] = "/data/YmirPS5/usb.log";
+
+void ReportUSB(const char *message) {
+    ps5::Report(message);
+    if (auto *file = std::fopen(kUSBLogPath, "a")) {
+        std::fprintf(file, "%s\n", message);
+        std::fclose(file);
+    }
+}
 
 bool LoadBIOS(ymir::Saturn &saturn, const fs::path &path, const fs::path &backup) {
     auto rom = std::make_unique<std::array<uint8, ymir::sys::kIPLSize>>();
@@ -46,19 +64,49 @@ bool LoadBIOS(ymir::Saturn &saturn, const fs::path &path, const fs::path &backup
     return true;
 }
 
-bool MountUSB(ymir::Saturn &saturn) {
-    const auto drives = ymir::media::host::EnumerateHostCDDrives();
-    for (bool discPresent : {true, false}) {
-        for (const auto &drive : drives) {
-            if ((drive.driveState == DriveState::MediaPresent) == discPresent && saturn.OpenHostCDDrive(drive.path)) {
-                ps5::Report(("Connected to " + drive.path).c_str());
-                return true;
+std::string MountUSB(ymir::Saturn &saturn) {
+    if (auto *file = std::fopen(kUSBLogPath, "w")) {
+        std::fclose(file);
+    }
+    ReportUSB("Looking for an optical drive");
+    const auto mount = [&saturn](const std::vector<ymir::media::host::HostDriveInfo> &drives) {
+        for (bool discPresent : {true, false}) {
+            for (const auto &drive : drives) {
+                if ((drive.driveState == DriveState::MediaPresent) != discPresent) {
+                    continue;
+                }
+                if (saturn.OpenHostCDDrive(drive.path, true)) {
+                    const auto &disc = saturn.GetCDInterface();
+                    ReportUSB(("Saturn CD ready on " + drive.path + ": " + disc.GetDiscHeader().gameTitle).c_str());
+                    return true;
+                }
+                ReportUSB(("Could not read a Saturn CD from " + drive.path).c_str());
             }
         }
+        return false;
+    };
+
+    auto drives = ymir::media::host::EnumerateHostCDDrives();
+    if (mount(drives)) {
+        return {};
     }
 
-    ps5::Report("Cannot open USB CD drive. Check the reader and access to /dev/xpt0 and /dev/pass*");
-    return false;
+    // A title started from the dashboard can be sandboxed away from the CAM
+    // devices. The service runs from the ELF loader and opens the reader with
+    // its own process permissions, so retry through it when direct access fails.
+#if Ymir_FF_HOST_CD_DRIVES
+    if (ps5::EnsureDiscService(ReportUSB)) {
+        drives = ymir::media::host::EnumerateHostCDDrives();
+        if (mount(drives)) {
+            return {};
+        }
+    }
+#endif
+
+    const std::string reason = drives.empty() ? "No accessible USB optical drive."
+                                              : "Reader found, but no readable Saturn game disc.";
+    ReportUSB(reason.c_str());
+    return reason + " See /data/YmirPS5/usb.log.";
 }
 
 Button MapButtons(uint32_t buttons) {
@@ -81,18 +129,29 @@ Button MapButtons(uint32_t buttons) {
 using Clock = std::chrono::steady_clock;
 using namespace std::chrono_literals;
 
-enum class Page { Home, Images, Video, Saves, Slots, Slot, Memory, Confirm, Controls };
+enum class Page { Home, Images, Video, Audio, Saves, Slots, Slot, Memory, Confirm, Controls };
+enum class HomeOption { BootUSB, Library, BootBIOS, Video, Audio, Saves, Exit };
+
+constexpr std::array kResolutionLabels{"1080p", "1440p", "4K (2160p)", "Native"};
+constexpr std::array kAspectLabels{"4:3", "16:9", "16:10", "Square pixels"};
+
+std::string VideoProfile(const ps5::VideoSettings &settings) {
+    return std::string(kResolutionLabels[unsigned(settings.resolution)]) + " · " +
+           kAspectLabels[unsigned(settings.aspect)];
+}
 
 class Frontend {
 public:
     Frontend()
         : m_settings(m_storage.ReadVideoSettings())
+        , m_audioSettings(m_storage.ReadAudioSettings())
         , m_saturn(std::make_unique<ymir::Saturn>()) {}
 
-    int Run();
+    int Run(std::ofstream &launchLog);
 
 private:
     bool EnsureBIOS();
+    void BootBIOS();
     bool Boot(std::string_view source);
     void FinishBoot(std::string game);
     void Resume();
@@ -109,18 +168,20 @@ private:
     void Browse(const fs::path &directory);
     void UpdateCovers();
     void ChangeVideo(int direction);
+    void ChangeAudio(int direction);
     void Ask(std::string question, std::function<std::string()> action);
     void Status(std::string text);
 
     ps5::Storage m_storage;
     ps5::VideoSettings m_settings;
+    ps5::AudioSettings m_audioSettings;
     ps5::MenuCanvas m_menu;
     ps5::Video m_video;
     ps5::Pad m_pad;
     ps5::Audio m_audio;
     uint32_t m_saturnButtons = 0;
     std::unique_ptr<ymir::Saturn> m_saturn;
-    std::future<bool> m_usbMount;
+    std::future<std::string> m_usbMount;
     Clock::time_point m_usbStarted{};
     bool m_usbFrameShown = false;
 
@@ -166,11 +227,23 @@ bool Frontend::EnsureBIOS() {
         return true;
     }
     const auto bios = ps5::FindBIOS();
-    m_hasBIOS = LoadBIOS(*m_saturn, bios, m_storage.BackupPath());
+    m_hasBIOS = !bios.empty() && LoadBIOS(*m_saturn, bios, m_storage.BackupPath());
     if (!m_hasBIOS) {
-        Status("Place a 512 KiB Saturn BIOS at " + bios.string());
+        Status("Expected a readable 512 KiB Saturn BIOS at " +
+               (fs::path{ps5::kBIOSDirectory} / ps5::kBIOSFilename).string());
+        return false;
     }
-    return m_hasBIOS;
+    ymir::smpc::PersistentSMPCData settings{};
+    if (m_storage.ReadSystemSettings(settings)) {
+        m_saturn->SMPC.LoadPersistentData(settings);
+    }
+    m_saturn->SMPC.SetPersistDataCallback({&m_storage,
+        [](const ymir::smpc::PersistentSMPCData &data, void *context) {
+            if (!static_cast<const ps5::Storage *>(context)->WriteSystemSettings(data)) {
+                ps5::Report("Could not save the Saturn clock and system settings");
+            }
+        }});
+    return true;
 }
 
 bool Frontend::Boot(std::string_view source) {
@@ -194,6 +267,14 @@ bool Frontend::Boot(std::string_view source) {
     m_saturn->LoadDisc(std::move(disc));
     FinishBoot(fs::path(source).filename().string());
     return true;
+}
+
+void Frontend::BootBIOS() {
+    if (EnsureBIOS()) {
+        m_saturn->EjectDisc();
+        m_saturn->UsePreferredRegion();
+        FinishBoot("Saturn BIOS");
+    }
 }
 
 void Frontend::FinishBoot(std::string game) {
@@ -269,13 +350,15 @@ void Frontend::BuildRows() {
     switch (m_page) {
     case Page::Home:
         m_title = m_started ? "Paused" : "Home";
-        m_detail = m_started ? m_game : "Choose a disc to start playing.";
+        m_detail = m_started ? m_game : "Choose a disc or start the Saturn BIOS.";
         if (m_started) {
-            m_rows.push_back({"Resume game", "", true, MenuIcon::Play});
+            m_rows.push_back({"Resume", "", true, MenuIcon::Play});
         }
         m_rows.insert(m_rows.end(), {{"Boot USB disc", "Optical drive", true, MenuIcon::Disc},
                                      {"Game library", "CHD, CUE, CCD, MDS, ISO", true, MenuIcon::Folder},
-                                     {"Video settings", m_video.Description(), true, MenuIcon::Video},
+                                     {"Boot Saturn BIOS", "Without a disc", true, MenuIcon::Play},
+                                     {"Video settings", VideoProfile(m_settings), true, MenuIcon::Video},
+                                     {"Audio settings", "", true, MenuIcon::Audio},
                                      {"Saved games", "", true, MenuIcon::Save},
                                      {"Exit YmirPS5", "", true, MenuIcon::Exit}});
         break;
@@ -290,20 +373,25 @@ void Frontend::BuildRows() {
         }
         break;
     case Page::Video: {
-        static constexpr const char *resolutions[] = {"1080p", "1440p", "2160p"};
-        static constexpr const char *aspects[] = {"4:3", "16:9", "16:10", "Square pixels"};
         m_title = "Video settings";
-        m_detail = m_video.Description();
-        m_rows = {{"Output resolution", resolutions[unsigned(m_settings.resolution)]},
-                  {"Aspect ratio", aspects[unsigned(m_settings.aspect)]},
-                  {"AMD FSR 1", m_video.HasGpu() ? (m_settings.fsr ? "On" : "Off") : "Requires Vulkan",
-                   m_video.HasGpu()},
+        m_detail = "Menu output  " + m_video.Description();
+        const bool upscale = m_settings.resolution != ps5::Resolution::Native;
+        const bool hasGpu = m_video.HasGpu();
+        const char *fsrValue = !upscale ? "Choose an upscale mode" : m_settings.fsr ? "On" : "Off";
+        m_rows = {{"Output resolution", kResolutionLabels[unsigned(m_settings.resolution)]},
+                  {"Aspect ratio", kAspectLabels[unsigned(m_settings.aspect)]},
+                  {"AMD FSR 1", hasGpu ? fsrValue : "Requires Vulkan", hasGpu && upscale},
                   {"FSR 3 frame generation",
-                   m_video.HasGpu() ? (m_settings.frameGen ? (m_settings.frameGen == 1 ? "x2" : "x4") : "Off")
-                                    : "Requires Vulkan",
-                   m_video.HasGpu()}};
+                   hasGpu ? (m_settings.frameGen ? (m_settings.frameGen == 1 ? "x2" : "x4") : "Off") : "Requires Vulkan",
+                   hasGpu}};
         break;
     }
+    case Page::Audio:
+        m_title = "Audio settings";
+        m_rows = {{"Game volume", std::to_string(m_audioSettings.gameVolume) + "%"},
+                  {"Menu sounds", std::to_string(m_audioSettings.menuVolume) + "%"},
+                  {"Mute all", m_audioSettings.mute ? "On" : "Off"}};
+        break;
     case Page::Saves: {
         const bool hasStates = !m_storage.StatePath(*m_saturn, 1).empty();
         m_title = "Saved games";
@@ -376,6 +464,7 @@ void Frontend::Browse(const fs::path &directory) {
     std::error_code error;
     auto entries = directory.empty() ? ps5::ImageRoots() : ps5::ListImages(directory, error);
     if (error) {
+        ps5::Report(("Library scan " + directory.string() + ": " + error.message()).c_str());
         Status("Could not open this folder  " + directory.string());
         return;
     }
@@ -422,16 +511,6 @@ void Frontend::ChangeVideo(int direction) {
     case 0: {
         constexpr int count = int(ps5::Resolution::Count);
         settings.resolution = ps5::Resolution((int(settings.resolution) + count + direction) % count);
-        if (!m_video.SetOutput(settings.resolution, settings.frameGen != 0)) {
-            m_settings.resolution = m_video.OutputResolution();
-            if (!m_video.HasGpu()) {
-                m_settings.fsr = false;
-                m_settings.frameGen = 0;
-            }
-            BuildRows();
-            Status("The display did not accept this resolution.");
-            return;
-        }
         break;
     }
     case 1: {
@@ -444,16 +523,6 @@ void Frontend::ChangeVideo(int direction) {
         constexpr std::array<unsigned, 3> modes{0, 1, 3};
         const auto index = std::ranges::find(modes, settings.frameGen) - modes.begin();
         settings.frameGen = modes[(index + 3 + direction) % 3];
-        if (!m_video.SetOutput(settings.resolution, settings.frameGen != 0)) {
-            m_settings.resolution = m_video.OutputResolution();
-            if (!m_video.HasGpu()) {
-                m_settings.fsr = false;
-                m_settings.frameGen = 0;
-            }
-            BuildRows();
-            Status("The display did not accept this mode.");
-            return;
-        }
         break;
     }
     }
@@ -469,6 +538,22 @@ void Frontend::ChangeVideo(int direction) {
     }
 }
 
+void Frontend::ChangeAudio(int direction) {
+    const auto adjust = [direction](unsigned volume) {
+        return static_cast<unsigned>(std::clamp(int(volume) + 10 * direction, 0, 100));
+    };
+    switch (m_selected) {
+    case 0: m_audioSettings.gameVolume = adjust(m_audioSettings.gameVolume); break;
+    case 1: m_audioSettings.menuVolume = adjust(m_audioSettings.menuVolume); break;
+    case 2: m_audioSettings.mute = !m_audioSettings.mute; break;
+    }
+    m_audio.SetSettings(m_audioSettings);
+    m_audio.PlayMenuSound(ps5::MenuSound::Confirm);
+    const bool saved = m_storage.WriteAudioSettings(m_audioSettings);
+    BuildRows();
+    Status(saved ? "" : "Settings applied for this session. Could not save them to storage.");
+}
+
 void Frontend::Ask(std::string question, std::function<std::string()> action) {
     m_returnPage = m_page;
     m_confirm = std::move(action);
@@ -480,6 +565,9 @@ void Frontend::Activate(int delta) {
     if (m_rows.empty() || !m_rows[m_selected].enabled) {
         return;
     }
+    if (m_page != Page::Audio) {
+        m_audio.PlayMenuSound(ps5::MenuSound::Confirm);
+    }
 
     switch (m_page) {
     case Page::Home: {
@@ -487,13 +575,24 @@ void Frontend::Activate(int delta) {
             Resume();
             return;
         }
-        const size_t option = m_selected - (m_started ? 1 : 0);
+        const auto option = static_cast<HomeOption>(m_selected - (m_started ? 1 : 0));
         switch (option) {
-        case 0: Boot({}); break;
-        case 1: OpenLibrary(); break;
-        case 2: SetPage(Page::Video); break;
-        case 3: SetPage(Page::Saves); break;
-        case 4: m_running = false; break;
+        case HomeOption::BootUSB: Boot({}); break;
+        case HomeOption::Library: OpenLibrary(); break;
+        case HomeOption::BootBIOS:
+            if (m_started) {
+                Ask("Start the BIOS and end the current session?", [this] {
+                    BootBIOS();
+                    return std::string{};
+                });
+            } else {
+                BootBIOS();
+            }
+            break;
+        case HomeOption::Video: SetPage(Page::Video); break;
+        case HomeOption::Audio: SetPage(Page::Audio); break;
+        case HomeOption::Saves: SetPage(Page::Saves); break;
+        case HomeOption::Exit: m_running = false; break;
         }
         break;
     }
@@ -506,6 +605,7 @@ void Frontend::Activate(int delta) {
         }
         break;
     case Page::Video: ChangeVideo(delta); break;
+    case Page::Audio: ChangeAudio(delta); break;
     case Page::Saves:
         if (m_selected == 0) {
             SetPage(Page::Slots);
@@ -624,13 +724,18 @@ void Frontend::Back() {
 
 void Frontend::Input(uint32_t held, uint32_t pressed) {
     if (pressed & (ps5::Circle | ps5::Touchpad)) {
+        if (m_page != Page::Home || m_started) {
+            m_audio.PlayMenuSound(ps5::MenuSound::Back);
+        }
         Back();
         return;
     }
     if (pressed & ps5::Triangle) {
         if (m_page == Page::Controls) {
+            m_audio.PlayMenuSound(ps5::MenuSound::Back);
             Back();
         } else if (m_page != Page::Confirm) {
+            m_audio.PlayMenuSound(ps5::MenuSound::Confirm);
             m_controlsReturnPage = m_page;
             m_controlsReturnSelection = m_selected;
             SetPage(Page::Controls);
@@ -641,11 +746,13 @@ void Frontend::Input(uint32_t held, uint32_t pressed) {
         return;
     }
     if (m_page == Page::Home && (pressed & ps5::Square)) {
+        m_audio.PlayMenuSound(ps5::MenuSound::Confirm);
         OpenLibrary();
         return;
     }
     const auto now = Clock::now();
-    const uint32_t directions = ps5::Up | ps5::Down | (m_page == Page::Images ? ps5::Left | ps5::Right : 0);
+    const bool repeatHorizontal = m_page == Page::Images || (m_page == Page::Audio && m_selected < 2);
+    const uint32_t directions = ps5::Up | ps5::Down | (repeatHorizontal ? ps5::Left | ps5::Right : 0);
     const uint32_t direction = held & directions;
     if (direction != m_repeatDirection) {
         m_repeatDirection = direction;
@@ -683,19 +790,25 @@ void Frontend::Input(uint32_t held, uint32_t pressed) {
         } else if (pressed & ps5::R1) {
             m_selected = std::min(m_selected + ps5::kMenuVisibleRows, m_rows.size() - 1);
         }
-        m_dirty |= m_selected != before;
+        if (m_selected != before) {
+            m_audio.PlayMenuSound(ps5::MenuSound::Navigate);
+            m_dirty = true;
+        }
     }
     if (pressed & ps5::Cross) {
         Activate();
-    } else if (m_page == Page::Video && (pressed & (ps5::Left | ps5::Right))) {
+    } else if ((m_page == Page::Video || m_page == Page::Audio) && (pressed & (ps5::Left | ps5::Right))) {
         Activate(pressed & ps5::Left ? -1 : 1);
     }
 }
 
-int Frontend::Run() {
+int Frontend::Run(std::ofstream &launchLog) {
+    launchLog << "Opening video" << std::endl;
     if (!m_video.Open(m_settings)) {
+        launchLog << "Video initialization failed" << std::endl;
         return 1;
     }
+    launchLog << m_video.Description() << std::endl;
     if (!m_pad.Open()) {
         ps5::Report("Could not open the active user's controller");
     }
@@ -703,6 +816,7 @@ int Frontend::Run() {
     m_saturn->VDP.SetSoftwareRenderCallback({&m_video, [](uint32 *data, uint32 w, uint32 h, void *context) {
                                                  static_cast<ps5::Video *>(context)->CopyFrame(data, w, h);
                                              }});
+    m_audio.SetSettings(m_audioSettings);
     if (m_audio.Open()) {
         m_saturn->SCSP.SetSampleCallback({&m_audio, [](sint16 left, sint16 right, void *context) {
                                               static_cast<ps5::Audio *>(context)->PushSample(left, right);
@@ -719,6 +833,7 @@ int Frontend::Run() {
     OpenMenu();
     Status(m_storage.SetupError());
     ps5::Report("Running. Touchpad opens the menu; L3+R3 exits");
+    launchLog << "Menu initialized" << std::endl;
 
     uint32_t previousButtons = 0;
     auto videoDeadline = Clock::now();
@@ -729,7 +844,7 @@ int Frontend::Run() {
         previousButtons = buttons;
         constexpr uint32_t exitButtons = ps5::L3 | ps5::R3;
         if ((buttons & exitButtons) == exitButtons) {
-            return 0;
+            break;
         }
 
         if (m_menuOpen && !m_usbMount.valid()) {
@@ -744,6 +859,7 @@ int Frontend::Run() {
             Input(buttons, pressed);
         } else if (!m_menuOpen && (pressed & ps5::Touchpad)) {
             OpenMenu();
+            m_audio.PlayMenuSound(ps5::MenuSound::Back);
         }
         if (!m_running) {
             break;
@@ -754,7 +870,7 @@ int Frontend::Run() {
             // The mount worker owns the Saturn core until the reader is ready.
             if (!m_usbFrameShown || m_usbMount.wait_for(0s) != std::future_status::ready) {
                 m_menu.DrawDiscLoading(std::chrono::duration<double>(now - m_usbStarted).count());
-                if (!m_video.PresentMenu(m_menu.Pixels())) {
+                if (!m_video.PresentMenu(m_menu.Pixels(), m_settings.frameGen != 0)) {
                     ps5::Report("Display presentation failed while reading a USB disc");
                     return 1;
                 }
@@ -762,17 +878,14 @@ int Frontend::Run() {
                 std::this_thread::sleep_until(now + 33ms);
                 continue;
             }
-            const bool mounted = m_usbMount.get();
+            const auto error = m_usbMount.get();
             if (!m_video.HasGpu()) {
-                m_settings.resolution = m_video.OutputResolution();
-                m_settings.fsr = false;
-                m_settings.frameGen = 0;
                 BuildRows();
             }
-            if (mounted) {
-                FinishBoot("USB disc");
+            if (error.empty()) {
+                FinishBoot(m_saturn->GetCDInterface().GetDiscHeader().gameTitle);
             } else {
-                Status("Could not open the USB drive. Check its connection and CAM access.");
+                Status(error);
             }
         }
 
@@ -795,7 +908,8 @@ int Frontend::Run() {
             if (m_dirty) {
                 std::vector<MenuHint> hints;
                 if (m_page != Page::Controls && !m_rows.empty()) {
-                    hints.push_back({MenuIcon::Cross, m_page == Page::Video ? "Change" : "Select"});
+                    hints.push_back(
+                        {MenuIcon::Cross, m_page == Page::Video || m_page == Page::Audio ? "Change" : "Select"});
                 }
                 if (m_page != Page::Home || m_started) {
                     hints.push_back({MenuIcon::Circle, m_page == Page::Home ? "Resume" : "Back"});
@@ -816,8 +930,7 @@ int Frontend::Run() {
                         hints.push_back({MenuIcon::None, "L1 / R1  Page"});
                     }
                 }
-                std::error_code error;
-                const bool biosPresent = m_hasBIOS || fs::file_size(ps5::FindBIOS(), error) == ymir::sys::kIPLSize;
+                const bool biosPresent = m_hasBIOS || !ps5::FindBIOS().empty();
                 if (m_page == Page::Images) {
                     std::span<const ps5::CoverImage> covers;
                     const size_t first = m_selected / ps5::kLibraryPageSize * ps5::kLibraryPageSize;
@@ -831,7 +944,7 @@ int Frontend::Run() {
                 }
                 m_dirty = false;
             }
-            drawable = m_video.PresentMenu(m_menu.Pixels());
+            drawable = m_video.PresentMenu(m_menu.Pixels(), m_settings.frameGen != 0);
         } else {
             if (buttons == 0) {
                 m_waitForRelease = false;
@@ -852,12 +965,14 @@ int Frontend::Run() {
         }
         if (!drawable) {
             ps5::Report("Display presentation failed");
+            launchLog << "First frame presentation failed" << std::endl;
             return 1;
         }
+        if (launchLog.is_open()) {
+            launchLog << "First menu frame submitted" << std::endl;
+            launchLog.close();
+        }
         if (hadGpu && !m_video.HasGpu()) {
-            m_settings.resolution = m_video.OutputResolution();
-            m_settings.fsr = false;
-            m_settings.frameGen = 0;
             if (m_menuOpen && m_page != Page::Confirm) {
                 BuildRows();
                 Status("Switched to VideoOut after a Vulkan error.");
@@ -866,16 +981,38 @@ int Frontend::Run() {
         videoDeadline += period;
         std::this_thread::sleep_until(videoDeadline);
     }
+    ps5::Report("Exit requested");
     return 0;
 }
 
 } // namespace
 
 int main(int, char **) {
+    // The shell keeps pic1.dds visible until the title releases its boot splash.
+    std::ofstream launchLog("/data/YmirPS5/launch.log");
+    launchLog << "YmirPS5 started" << std::endl;
+    const int splashResult = sceSystemServiceHideSplashScreen();
+    launchLog << "HideSplashScreen returned " << splashResult << std::endl;
+
+    // The sandbox hides /dev, including the CAM nodes of a USB optical reader.
+    // Ask the console's unlock service before this process starts any thread.
+    const auto unlock = ps5::UnlockSandbox();
+    launchLog << "Sandbox unlock: " << ps5::DescribeUnlock(unlock) << std::endl;
+    ymir::media::host::SetCDDriveLogCallback(ReportUSB);
     try {
-        return std::make_unique<Frontend>()->Run();
+        return std::make_unique<Frontend>()->Run(launchLog);
     } catch (const std::exception &error) {
         ps5::Report(error.what());
+        launchLog << error.what() << std::endl;
         return 1;
+    }
+}
+
+// The native CRT calls this after main and would otherwise terminate with libc exit().
+extern "C" [[noreturn]] void catchReturnFromMain(int) {
+    ps5::Report("Returning to the PS5 home screen");
+    for (;;) {
+        sceSystemServiceLoadExec("exit", nullptr);
+        std::this_thread::sleep_for(std::chrono::seconds{1});
     }
 }

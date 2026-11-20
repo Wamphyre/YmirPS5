@@ -41,11 +41,14 @@ public:
     /// - Other systems: TBD
     /// @param[in] path the host device path. Enumerate with `ymir::media::host::EnumerateHostCDDrives()`.
     /// @param[in] timeout maximum time to wait for the device to be ready
+    /// @param[in] requireSaturnDisc only attach the drive after reading a TOC and valid Saturn header
     /// @return `true` if the device was successfully opened, `false` otherwise
-    bool OpenHostDevice(std::string path, std::chrono::milliseconds timeout = std::chrono::milliseconds{1000});
+    bool OpenHostDevice(std::string path, std::chrono::milliseconds timeout = std::chrono::milliseconds{1000},
+                        bool requireSaturnDisc = false);
 
-    /// @brief Ejects the disc.
-    void Eject();
+    /// @brief Detaches the current disc image or optical drive.
+    /// @return `true` if an image or drive was attached.
+    bool Eject();
 
     /// @brief Updates the drive state, including the TOC and disc header information.
     /// If this returns `DriveState::MediaPresent`, the TOC and disc header are guaranteed to be updated.

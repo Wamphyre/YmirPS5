@@ -2,8 +2,11 @@
 
 #include "platform.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdio>
+#include <numbers>
 
 namespace {
 
@@ -37,6 +40,21 @@ int sceAudioOutClose(int handle);
 
 constexpr unsigned kSourceRate = 44100;
 constexpr unsigned kOutputRate = 48000;
+
+// Short, soft cues with different contours for navigation, confirmation and back.
+auto MakeMenuCue(float firstHz, float secondHz, unsigned durationMs) {
+    std::vector<int16_t> samples(kOutputRate * durationMs / 1000);
+    float phase = 0.0f;
+    for (size_t i = 0; i < samples.size(); ++i) {
+        const float position = float(i) / float(samples.size() - 1);
+        const float time = float(i) / kOutputRate;
+        const float envelope = std::min(1.0f, time / 0.004f) * (1.0f - position) * (1.0f - position);
+        const float tone = std::sin(phase) + 0.16f * std::sin(2.0f * phase);
+        samples[i] = static_cast<int16_t>(4100.0f * envelope * tone);
+        phase += 2 * std::numbers::pi_v<float> * std::lerp(firstHz, secondHz, position) / kOutputRate;
+    }
+    return samples;
+}
 
 } // namespace
 
@@ -140,6 +158,31 @@ void Audio::Clear() {
     m_count = 0;
 }
 
+void Audio::SetSettings(const AudioSettings &settings) {
+    const std::lock_guard lock{m_mutex};
+    m_settings = settings;
+    if (settings.mute || settings.menuVolume == 0) {
+        m_menuSound = {};
+    }
+}
+
+void Audio::PlayMenuSound(MenuSound sound) {
+    if (m_handle < 0) {
+        return;
+    }
+    static const std::array cues{MakeMenuCue(670.0f, 690.0f, 42),
+                                 MakeMenuCue(610.0f, 960.0f, 106),
+                                 MakeMenuCue(730.0f, 460.0f, 90)};
+    {
+        const std::lock_guard lock{m_mutex};
+        if (m_settings.mute || m_settings.menuVolume == 0) {
+            return;
+        }
+        m_menuSound = cues[unsigned(sound)];
+    }
+    m_ready.notify_one();
+}
+
 void Audio::QueueSample(int16_t left, int16_t right) {
     m_pending[m_pendingSamples++] = left;
     m_pending[m_pendingSamples++] = right;
@@ -162,11 +205,13 @@ void Audio::QueueSample(int16_t left, int16_t right) {
 void Audio::Playback() {
     {
         std::unique_lock lock{m_mutex};
-        m_ready.wait(lock, [this] { return m_count > 0 || m_stopping; });
+        m_ready.wait(lock, [this] { return m_count > 0 || !m_menuSound.empty() || m_stopping; });
     }
 
     for (;;) {
         Grain grain{};
+        AudioSettings settings;
+        std::span<const int16_t> effect;
         {
             const std::lock_guard lock{m_mutex};
             if (m_stopping) {
@@ -176,6 +221,20 @@ void Audio::Playback() {
                 grain = m_queue[m_head];
                 m_head = (m_head + 1) % m_queue.size();
                 --m_count;
+            }
+            settings = m_settings;
+            effect = m_menuSound.first(std::min<size_t>(kGrainSize, m_menuSound.size()));
+            m_menuSound = m_menuSound.subspan(effect.size());
+        }
+        if (settings.mute) {
+            grain.fill(0);
+        } else if (settings.gameVolume != 100 || !effect.empty()) {
+            for (size_t i = 0; i < kGrainSize; ++i) {
+                const int cue = i < effect.size() ? effect[i] * int(settings.menuVolume) / 100 : 0;
+                for (size_t j = i * 2; j < i * 2 + 2; ++j) {
+                    const int sample = grain[j] * int(settings.gameVolume) / 100 + cue;
+                    grain[j] = static_cast<int16_t>(std::clamp(sample, -32768, 32767));
+                }
             }
         }
         if (sceAudioOutOutput(m_handle, grain.data()) < 0) {
