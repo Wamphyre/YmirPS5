@@ -24,6 +24,9 @@ namespace {
 
     constexpr std::array<std::string_view, 5> kImageExtensions{".ccd", ".chd", ".cue", ".iso", ".mds"};
     constexpr uintmax_t kMaxStateSize = 32 * 1024 * 1024;
+    const fs::path kDataDirectory{"/data/YmirPS5"};
+    const fs::path kFallbackDirectory{"/download0"};
+    const fs::path kBiosPath = kDataDirectory / "bios" / "bios.bin";
 
     std::string Lower(std::string text) {
         for (char &c : text) {
@@ -101,12 +104,21 @@ namespace {
 
 } // namespace
 
-std::vector<ImageEntry> ImageRoots(const fs::path &biosDirectory) {
+fs::path FindBIOS() {
+    std::error_code error;
+    for (const auto &path : {kBiosPath, kDataDirectory / "bios.bin", kFallbackDirectory / "bios.bin"}) {
+        if (fs::is_regular_file(path, error)) {
+            return path;
+        }
+    }
+    return kBiosPath;
+}
+
+std::vector<ImageEntry> ImageRoots() {
     std::vector<ImageEntry> roots;
     std::error_code error;
-    for (const auto &path : {fs::path{"/app0/games"}, fs::path{"/data/YmirPS5/games"}, fs::path{"/download0/games"},
-                             biosDirectory / "games"}) {
-        if (fs::is_directory(path, error) && std::ranges::find(roots, path, &ImageEntry::path) == roots.end()) {
+    for (const auto &path : {kDataDirectory / "games", fs::path{"/app0/games"}, kFallbackDirectory / "games"}) {
+        if (fs::is_directory(path, error)) {
             roots.push_back({path, true});
         }
     }
@@ -138,19 +150,30 @@ std::vector<ImageEntry> ListImages(const fs::path &path, std::error_code &error)
     return files;
 }
 
-Storage::Storage(const fs::path &bios)
-    : m_biosDirectory(bios.has_parent_path() ? bios.parent_path() : fs::path{"."}) {
-    for (const auto &candidate : {m_biosDirectory, fs::path{"/data/YmirPS5"}, fs::path{"/download0"}}) {
-        if (CanWriteDirectory(candidate)) {
-            m_root = candidate;
-            break;
+Storage::Storage() {
+    std::error_code error;
+    for (const auto *directory : {"games", "bios", "states", "covers"}) {
+        const auto path = kDataDirectory / directory;
+        fs::create_directories(path, error);
+        if (error && m_setupError.empty()) {
+            m_setupError = "Could not create " + path.string() + ". Check storage access.";
         }
     }
-    m_backupPath = m_biosDirectory / "backup.bin";
-    std::error_code error;
-    if (!m_root.empty() && m_root != m_biosDirectory && !fs::exists(m_backupPath, error)) {
-        m_backupPath = m_root / "backup.bin";
+
+    const auto biosDirectory = FindBIOS().parent_path();
+    const bool dataWritable = CanWriteDirectory(kDataDirectory);
+    if ((biosDirectory == kFallbackDirectory || !dataWritable) && CanWriteDirectory(kFallbackDirectory)) {
+        m_root = kFallbackDirectory;
+    } else if (dataWritable) {
+        m_root = kDataDirectory;
     }
+    if (!dataWritable && m_setupError.empty()) {
+        m_setupError = "Could not write to " + kDataDirectory.string() + ". Check storage access.";
+    }
+
+    const auto backup = (m_root.empty() ? kDataDirectory : m_root) / "backup.bin";
+    const auto legacyBackup = biosDirectory / "backup.bin";
+    m_backupPath = !fs::exists(backup, error) && fs::is_regular_file(legacyBackup, error) ? legacyBackup : backup;
 }
 
 VideoSettings Storage::ReadVideoSettings() const {

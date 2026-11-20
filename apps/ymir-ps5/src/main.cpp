@@ -2,6 +2,7 @@
 
 #include "platform.hpp"
 
+#include "covers.hpp"
 #include "menu.hpp"
 
 #include <ymir/media/host_cd.hpp>
@@ -15,6 +16,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <future>
 #include <memory>
 #include <string_view>
 
@@ -23,9 +25,8 @@ namespace {
 namespace fs = std::filesystem;
 using Button = ymir::peripheral::Button;
 using ymir::media::DriveState;
-
-constexpr std::string_view kDrivePrefix = "/dev/cd";
-constexpr const char *kDefaultBIOS = "/data/YmirPS5/bios.bin";
+using ps5::MenuHint;
+using ps5::MenuIcon;
 
 bool LoadBIOS(ymir::Saturn &saturn, const fs::path &path, const fs::path &backup) {
     auto rom = std::make_unique<std::array<uint8, ymir::sys::kIPLSize>>();
@@ -45,24 +46,15 @@ bool LoadBIOS(ymir::Saturn &saturn, const fs::path &path, const fs::path &backup
     return true;
 }
 
-bool MountUSB(ymir::Saturn &saturn, std::string_view source) {
-    using ymir::media::host::HostDriveInfo;
-    if (source.empty()) {
-        const auto drives = ymir::media::host::EnumerateHostCDDrives();
-        const auto ready = std::ranges::find(drives, DriveState::MediaPresent, &HostDriveInfo::driveState);
-        if (ready != drives.end() && saturn.OpenHostCDDrive(ready->path)) {
-            ps5::Report(("Connected to " + ready->path).c_str());
-            return true;
-        }
+bool MountUSB(ymir::Saturn &saturn) {
+    const auto drives = ymir::media::host::EnumerateHostCDDrives();
+    for (bool discPresent : {true, false}) {
         for (const auto &drive : drives) {
-            if (saturn.OpenHostCDDrive(drive.path)) {
+            if ((drive.driveState == DriveState::MediaPresent) == discPresent && saturn.OpenHostCDDrive(drive.path)) {
                 ps5::Report(("Connected to " + drive.path).c_str());
                 return true;
             }
         }
-    } else if (saturn.OpenHostCDDrive(std::string(source))) {
-        ps5::Report(("Connected to " + std::string(source)).c_str());
-        return true;
     }
 
     ps5::Report("Cannot open USB CD drive. Check the reader and access to /dev/xpt0 and /dev/pass*");
@@ -89,21 +81,20 @@ Button MapButtons(uint32_t buttons) {
 using Clock = std::chrono::steady_clock;
 using namespace std::chrono_literals;
 
-enum class Page { Home, Images, Video, Saves, Slots, Slot, Memory, Confirm };
+enum class Page { Home, Images, Video, Saves, Slots, Slot, Memory, Confirm, Controls };
 
 class Frontend {
 public:
-    explicit Frontend(fs::path bios)
-        : m_bios(std::move(bios))
-        , m_storage(m_bios)
-        , m_settings(m_storage.ReadVideoSettings())
+    Frontend()
+        : m_settings(m_storage.ReadVideoSettings())
         , m_saturn(std::make_unique<ymir::Saturn>()) {}
 
-    int Run(std::string_view source);
+    int Run();
 
 private:
     bool EnsureBIOS();
     bool Boot(std::string_view source);
+    void FinishBoot(std::string game);
     void Resume();
     void OpenMenu();
     void PollMedia();
@@ -114,12 +105,13 @@ private:
     void Input(uint32_t held, uint32_t pressed);
     void Activate(int delta = 1);
     void Back();
+    void OpenLibrary();
     void Browse(const fs::path &directory);
+    void UpdateCovers();
     void ChangeVideo(int direction);
     void Ask(std::string question, std::function<std::string()> action);
     void Status(std::string text);
 
-    fs::path m_bios;
     ps5::Storage m_storage;
     ps5::VideoSettings m_settings;
     ps5::MenuCanvas m_menu;
@@ -128,6 +120,9 @@ private:
     ps5::Audio m_audio;
     uint32_t m_saturnButtons = 0;
     std::unique_ptr<ymir::Saturn> m_saturn;
+    std::future<bool> m_usbMount;
+    Clock::time_point m_usbStarted{};
+    bool m_usbFrameShown = false;
 
     bool m_hasBIOS = false;
     bool m_started = false;
@@ -141,6 +136,8 @@ private:
 
     Page m_page = Page::Home;
     Page m_returnPage = Page::Home;
+    Page m_controlsReturnPage = Page::Home;
+    size_t m_controlsReturnSelection = 0;
     size_t m_selected = 0;
     unsigned m_slot = 1;
     std::string m_title;
@@ -151,6 +148,14 @@ private:
     fs::path m_directory;
     fs::path m_browserRoot;
     std::vector<ps5::ImageEntry> m_images;
+    struct LibraryCovers {
+        size_t generation = 0;
+        size_t first = 0;
+        std::vector<ps5::CoverImage> images;
+    };
+    size_t m_libraryGeneration = 1;
+    LibraryCovers m_libraryCovers;
+    std::future<LibraryCovers> m_coverTask;
     std::vector<ymir::bup::BackupFileInfo> m_memoryFiles;
     uint32_t m_repeatDirection = 0;
     Clock::time_point m_nextRepeat{};
@@ -160,9 +165,10 @@ bool Frontend::EnsureBIOS() {
     if (m_hasBIOS) {
         return true;
     }
-    m_hasBIOS = LoadBIOS(*m_saturn, m_bios, m_storage.BackupPath());
+    const auto bios = ps5::FindBIOS();
+    m_hasBIOS = LoadBIOS(*m_saturn, bios, m_storage.BackupPath());
     if (!m_hasBIOS) {
-        Status("Se necesita una BIOS Saturn de 512 KiB en " + m_bios.string());
+        Status("Place a 512 KiB Saturn BIOS at " + bios.string());
     }
     return m_hasBIOS;
 }
@@ -172,29 +178,31 @@ bool Frontend::Boot(std::string_view source) {
         return false;
     }
 
-    if (source.empty() || source.starts_with(kDrivePrefix)) {
-        if (!MountUSB(*m_saturn, source)) {
-            Status("No se pudo abrir el lector USB. Comprueba la conexión y el acceso CAM.");
-            return false;
-        }
-        m_game = "Disco USB";
-    } else {
-        ymir::media::Disc disc;
-        if (!ymir::media::LoadDisc(fs::path(source), disc, false,
-                                   [](auto, const std::string &message) { ps5::Report(message.c_str()); })) {
-            Status("No se pudo abrir la imagen. Comprueba la imagen y sus archivos asociados.");
-            return false;
-        }
-        m_saturn->LoadDisc(std::move(disc));
-        m_game = fs::path(source).filename().string();
+    if (source.empty()) {
+        m_usbStarted = Clock::now();
+        m_usbFrameShown = false;
+        m_usbMount = std::async(std::launch::async, [this] { return MountUSB(*m_saturn); });
+        return true;
     }
 
+    ymir::media::Disc disc;
+    if (!ymir::media::LoadDisc(fs::path(source), disc, false,
+                               [](auto, const std::string &message) { ps5::Report(message.c_str()); })) {
+        Status("Could not open the disc image. Check its format and companion files.");
+        return false;
+    }
+    m_saturn->LoadDisc(std::move(disc));
+    FinishBoot(fs::path(source).filename().string());
+    return true;
+}
+
+void Frontend::FinishBoot(std::string game) {
+    m_game = std::move(game);
     m_saturn->Reset(true);
     m_video.ClearGameFrame();
     m_driveState = DriveState::Unknown;
     m_started = true;
     Resume();
-    return true;
 }
 
 void Frontend::Resume() {
@@ -260,71 +268,67 @@ void Frontend::BuildRows() {
 
     switch (m_page) {
     case Page::Home:
-        m_title = "Menú principal";
-        m_detail = m_started ? m_game : "Elige un disco para arrancar Sega Saturn";
+        m_title = m_started ? "Paused" : "Home";
+        m_detail = m_started ? m_game : "Choose a disc to start playing.";
         if (m_started) {
-            m_rows.push_back({"Continuar", ""});
+            m_rows.push_back({"Resume game", "", true, MenuIcon::Play});
         }
-        m_rows.insert(m_rows.end(), {{"Arrancar disco USB", "Lector óptico"},
-                                     {"Cargar una imagen", "CHD, CUE, CCD, MDS, ISO"},
-                                     {"Vídeo", m_video.Description()},
-                                     {"Partidas guardadas", ""},
-                                     {"Salir de Ymir", ""}});
+        m_rows.insert(m_rows.end(), {{"Boot USB disc", "Optical drive", true, MenuIcon::Disc},
+                                     {"Game library", "CHD, CUE, CCD, MDS, ISO", true, MenuIcon::Folder},
+                                     {"Video settings", m_video.Description(), true, MenuIcon::Video},
+                                     {"Saved games", "", true, MenuIcon::Save},
+                                     {"Exit YmirPS5", "", true, MenuIcon::Exit}});
         break;
     case Page::Images:
-        m_title = "Cargar una imagen";
-        m_detail = m_directory.empty() ? "Elige una carpeta de juegos" : m_directory.string();
+        m_title = "Game library";
+        m_detail = m_directory.empty() ? "Choose a storage location." : m_directory.string();
         for (const auto &entry : m_images) {
-            m_rows.push_back({m_directory.empty() ? entry.path.string() : entry.path.filename().string(),
-                              entry.folder ? "Carpeta" : entry.path.extension().string()});
-        }
-        if (m_images.empty()) {
-            m_rows.push_back({"No hay imágenes ni carpetas disponibles", "", false});
-            if (m_directory.empty()) {
-                m_detail = "Copia las imágenes en games, dentro de la carpeta de Ymir";
-            }
+            m_rows.push_back({entry.folder ? entry.path.filename().string() : entry.path.stem().string(),
+                              m_directory.empty() ? entry.path.parent_path().string() :
+                              entry.folder ? "Folder" : entry.path.extension().string(), true,
+                              entry.folder ? MenuIcon::Folder : MenuIcon::Disc});
         }
         break;
     case Page::Video: {
         static constexpr const char *resolutions[] = {"1080p", "1440p", "2160p"};
-        static constexpr const char *aspects[] = {"4:3", "16:9", "16:10", "Píxeles cuadrados"};
-        m_title = "Vídeo";
+        static constexpr const char *aspects[] = {"4:3", "16:9", "16:10", "Square pixels"};
+        m_title = "Video settings";
         m_detail = m_video.Description();
-        m_rows = {{"Resolución de salida", resolutions[unsigned(m_settings.resolution)]},
-                  {"Relación de aspecto", aspects[unsigned(m_settings.aspect)]},
-                  {"AMD FSR 1", m_video.HasGpu() ? (m_settings.fsr ? "Activado" : "Desactivado") : "Requiere Vulkan",
+        m_rows = {{"Output resolution", resolutions[unsigned(m_settings.resolution)]},
+                  {"Aspect ratio", aspects[unsigned(m_settings.aspect)]},
+                  {"AMD FSR 1", m_video.HasGpu() ? (m_settings.fsr ? "On" : "Off") : "Requires Vulkan",
                    m_video.HasGpu()},
-                  {"Generación de fotogramas FSR 3",
-                   m_video.HasGpu() ? (m_settings.frameGen ? (m_settings.frameGen == 1 ? "x2" : "x4") : "Desactivada")
-                                    : "Requiere Vulkan",
+                  {"FSR 3 frame generation",
+                   m_video.HasGpu() ? (m_settings.frameGen ? (m_settings.frameGen == 1 ? "x2" : "x4") : "Off")
+                                    : "Requires Vulkan",
                    m_video.HasGpu()}};
         break;
     }
     case Page::Saves: {
         const bool hasStates = !m_storage.StatePath(*m_saturn, 1).empty();
-        m_title = "Partidas guardadas";
-        m_detail = m_started ? m_game : "Memoria de Saturn y estados del emulador";
-        m_rows = {{"Estados rápidos", hasStates ? "5 ranuras por disco" : "Requiere un disco identificado", hasStates},
-                  {"Memoria interna de Saturn", ""}};
+        m_title = "Saved games";
+        m_detail = m_started ? m_game : "";
+        m_rows = {{"Save states", hasStates ? "5 slots per disc" : "Requires an identified disc", hasStates},
+                  {"Saturn backup memory", ""}};
         break;
     }
     case Page::Slots:
-        m_title = "Estados rápidos";
+        m_title = "Save states";
         m_detail = m_game;
         for (unsigned slot = 1; slot <= 5; ++slot) {
             std::error_code error;
             const bool occupied = fs::is_regular_file(m_storage.StatePath(*m_saturn, slot), error);
-            m_rows.push_back({"Ranura " + std::to_string(slot), occupied ? "Guardada" : "Vacía"});
+            m_rows.push_back({"Slot " + std::to_string(slot), occupied ? "Saved" : "Empty"});
         }
         break;
     case Page::Slot: {
         std::error_code error;
         const bool occupied = fs::is_regular_file(m_storage.StatePath(*m_saturn, m_slot), error);
-        m_title = "Ranura " + std::to_string(m_slot);
+        m_title = "Slot " + std::to_string(m_slot);
         m_detail = m_game;
-        m_rows = {{"Guardar estado", occupied ? "Sustituir" : "Vacía"},
-                  {"Cargar estado", "", occupied},
-                  {"Borrar estado", "", occupied}};
+        m_rows = {{"Save state", occupied ? "Overwrite" : "Empty"},
+                  {"Load state", "", occupied},
+                  {"Delete state", "", occupied}};
         break;
     }
     case Page::Memory: {
@@ -333,17 +337,28 @@ void Frontend::BuildRows() {
         std::error_code error;
         const auto transferPath = m_storage.MemoryTransferPath();
         const bool hasTransfer = !transferPath.empty() && fs::is_regular_file(transferPath, error);
-        m_title = "Memoria interna";
-        m_detail = "Bloques usados: " + std::to_string(memory.GetUsedBlocks()) + " de " +
+        m_title = "Saturn backup memory";
+        m_detail = "Blocks used  " + std::to_string(memory.GetUsedBlocks()) + " / " +
                    std::to_string(memory.GetTotalBlocks());
-        m_rows = {{"Exportar memoria completa", "memory-transfer.bin", !transferPath.empty()},
-                  {"Importar memoria completa", "memory-transfer.bin", hasTransfer}};
+        m_rows = {{"Export backup memory", "memory-transfer.bin", !transferPath.empty()},
+                  {"Import backup memory", "memory-transfer.bin", hasTransfer}};
         for (const auto &file : m_memoryFiles) {
-            m_rows.push_back({file.header.filename, std::to_string(file.numBlocks) + " bloques · Borrar"});
+            m_rows.push_back({file.header.filename, std::to_string(file.numBlocks) + " blocks  /  Delete"});
         }
         break;
     }
-    case Page::Confirm: m_rows = {{"Cancelar", ""}, {"Confirmar", ""}}; break;
+    case Page::Confirm: m_rows = {{"Cancel", ""}, {"Confirm", ""}}; break;
+    case Page::Controls:
+        m_title = "DualSense controls";
+        m_detail = "Menu shortcuts and Saturn button mapping";
+        m_rows = {{"Accept  /  Saturn A", "", false, MenuIcon::Cross},
+                  {"Back  /  Saturn B", "", false, MenuIcon::Circle},
+                  {"Game library  /  Saturn X", "", false, MenuIcon::Square},
+                  {"Controls  /  Saturn Y", "", false, MenuIcon::Triangle},
+                  {"Move  /  Saturn D-pad", "D-pad or left stick", false, MenuIcon::DPad},
+                  {"Page  /  Saturn Z and C", "L1 and R1", false},
+                  {"Saturn L, R and Start", "L2, R2 and Options", false}};
+        break;
     }
     if (!m_rows.empty()) {
         m_selected = std::min(m_selected, m_rows.size() - 1);
@@ -351,11 +366,17 @@ void Frontend::BuildRows() {
     m_dirty = true;
 }
 
+void Frontend::OpenLibrary() {
+    const auto roots = ps5::ImageRoots();
+    m_directory.clear();
+    Browse(roots.empty() ? fs::path{} : roots.front().path);
+}
+
 void Frontend::Browse(const fs::path &directory) {
     std::error_code error;
-    auto entries = directory.empty() ? ps5::ImageRoots(m_bios.parent_path()) : ps5::ListImages(directory, error);
+    auto entries = directory.empty() ? ps5::ImageRoots() : ps5::ListImages(directory, error);
     if (error) {
-        Status("No se puede abrir la carpeta: " + directory.string());
+        Status("Could not open this folder  " + directory.string());
         return;
     }
     if (directory.empty()) {
@@ -365,7 +386,34 @@ void Frontend::Browse(const fs::path &directory) {
     }
     m_directory = directory;
     m_images = std::move(entries);
+    ++m_libraryGeneration;
+    m_libraryCovers = {};
     SetPage(Page::Images);
+}
+
+void Frontend::UpdateCovers() {
+    if (m_coverTask.valid() && m_coverTask.wait_for(0s) == std::future_status::ready) {
+        auto covers = m_coverTask.get();
+        if (covers.generation == m_libraryGeneration) {
+            m_libraryCovers = std::move(covers);
+            m_dirty = true;
+        }
+    }
+    const size_t first = m_selected / ps5::kLibraryPageSize * ps5::kLibraryPageSize;
+    if (m_page != Page::Images || m_coverTask.valid() || m_images.empty() || m_directory.empty() ||
+        (m_libraryCovers.generation == m_libraryGeneration && m_libraryCovers.first == first)) {
+        return;
+    }
+
+    const size_t end = std::min(first + ps5::kLibraryPageSize, m_images.size());
+    std::vector<ps5::ImageEntry> entries(m_images.begin() + first, m_images.begin() + end);
+    m_coverTask = std::async(std::launch::async, [entries = std::move(entries), first, generation = m_libraryGeneration] {
+        LibraryCovers covers{generation, first, {}};
+        for (const auto &entry : entries) {
+            covers.images.push_back(entry.folder ? ps5::CoverImage{} : ps5::FindCover(entry.path));
+        }
+        return covers;
+    });
 }
 
 void Frontend::ChangeVideo(int direction) {
@@ -381,7 +429,7 @@ void Frontend::ChangeVideo(int direction) {
                 m_settings.frameGen = 0;
             }
             BuildRows();
-            Status("La pantalla no aceptó esa resolución.");
+            Status("The display did not accept this resolution.");
             return;
         }
         break;
@@ -403,7 +451,7 @@ void Frontend::ChangeVideo(int direction) {
                 m_settings.frameGen = 0;
             }
             BuildRows();
-            Status("La pantalla no aceptó el cambio de modo.");
+            Status("The display did not accept this mode.");
             return;
         }
         break;
@@ -413,9 +461,9 @@ void Frontend::ChangeVideo(int direction) {
     const bool saved = m_storage.WriteVideoSettings(m_settings);
     BuildRows();
     if (!saved) {
-        Status("Cambio aplicado para esta sesión. No se pudo guardar la configuración.");
+        Status("Settings applied for this session. Could not save them to storage.");
     } else if (m_selected == 3 && m_settings.frameGen) {
-        Status("La interpolación depende de los Hz de la pantalla y de los FPS reales del juego.");
+        Status("Frame generation depends on the refresh rate and the game's frame rate.");
     } else {
         Status("");
     }
@@ -426,7 +474,6 @@ void Frontend::Ask(std::string question, std::function<std::string()> action) {
     m_confirm = std::move(action);
     SetPage(Page::Confirm);
     m_title = std::move(question);
-    m_detail = "El cambio se aplica al confirmar.";
 }
 
 void Frontend::Activate(int delta) {
@@ -443,10 +490,7 @@ void Frontend::Activate(int delta) {
         const size_t option = m_selected - (m_started ? 1 : 0);
         switch (option) {
         case 0: Boot({}); break;
-        case 1:
-            m_directory.clear();
-            Browse({});
-            break;
+        case 1: OpenLibrary(); break;
         case 2: SetPage(Page::Video); break;
         case 3: SetPage(Page::Saves); break;
         case 4: m_running = false; break;
@@ -474,38 +518,38 @@ void Frontend::Activate(int delta) {
         SetPage(Page::Slot);
         break;
     case Page::Slot: {
-        constexpr const char *failed = "No se pudo guardar el estado.";
+        constexpr const char *failed = "Could not save the state.";
         std::error_code error;
         const auto path = m_storage.StatePath(*m_saturn, m_slot);
         if (path.empty()) {
-            Status("El disco actual no está disponible.");
+            Status("The current disc is unavailable.");
             break;
         }
         const bool occupied = fs::is_regular_file(path, error);
         const auto save = [this]() -> std::string {
-            return m_storage.SaveState(*m_saturn, m_slot) ? "Estado guardado." : failed;
+            return m_storage.SaveState(*m_saturn, m_slot) ? "State saved." : failed;
         };
         if (m_selected == 0) {
             if (occupied) {
-                Ask("¿Sustituir este estado?", save);
+                Ask("Overwrite this save state?", save);
             } else {
                 const auto message = save();
                 BuildRows();
                 Status(message);
             }
         } else if (m_selected == 1) {
-            Ask("¿Cargar este estado?", [this] {
+            Ask("Load this save state?", [this] {
                 if (!m_storage.LoadState(*m_saturn, m_slot)) {
-                    return std::string("Estado ilegible o incompatible con el disco o la BIOS actual.");
+                    return std::string("This state could not be read or is incompatible with the current disc or BIOS.");
                 }
                 m_video.ClearGameFrame();
                 Resume();
-                return std::string("Estado cargado.");
+                return std::string("State loaded.");
             });
         } else {
-            Ask("¿Borrar este estado?", [path] {
+            Ask("Delete this save state?", [path] {
                 std::error_code removalError;
-                return fs::remove(path, removalError) ? "Estado borrado." : "No se pudo borrar el estado.";
+                return fs::remove(path, removalError) ? "State deleted." : "Could not delete the state.";
             });
         }
         break;
@@ -514,27 +558,27 @@ void Frontend::Activate(int delta) {
         if (m_selected == 0) {
             const auto path = m_storage.MemoryTransferPath();
             const auto doExport = [this, path]() -> std::string {
-                return m_storage.ExportMemory(*m_saturn) ? "Memoria exportada a " + path.string()
-                                                         : "No se pudo exportar la memoria.";
+                return m_storage.ExportMemory(*m_saturn) ? "Backup memory exported to " + path.string()
+                                                         : "Could not export backup memory.";
             };
             std::error_code error;
             if (fs::exists(path, error)) {
-                Ask("¿Sustituir el archivo exportado?", doExport);
+                Ask("Overwrite the export?", doExport);
             } else {
                 const auto message = doExport();
                 BuildRows();
                 Status(message);
             }
         } else if (m_selected == 1) {
-            Ask("¿Reemplazar la memoria de Saturn?", [this] {
-                return m_storage.ImportMemory(*m_saturn) ? "Memoria importada."
-                                                         : "Archivo de memoria inválido o inaccesible.";
+            Ask("Replace Saturn backup memory?", [this] {
+                return m_storage.ImportMemory(*m_saturn) ? "Backup memory imported."
+                                                         : "The backup memory file is invalid or inaccessible.";
             });
         } else {
             const auto file = m_memoryFiles[m_selected - 2].header.filename;
-            Ask("¿Borrar " + file + "?", [this, file] {
-                return m_saturn->mem.GetInternalBackupRAM().Delete(file) ? "Partida borrada."
-                                                                         : "Partida no encontrada.";
+            Ask("Delete " + file + "?", [this, file] {
+                return m_saturn->mem.GetInternalBackupRAM().Delete(file) ? "Save deleted."
+                                                                         : "Save not found.";
             });
         }
         break;
@@ -545,6 +589,7 @@ void Frontend::Activate(int delta) {
         Status(message);
         break;
     }
+    case Page::Controls: break;
     }
 }
 
@@ -569,6 +614,10 @@ void Frontend::Back() {
         m_confirm = {};
         SetPage(m_returnPage);
         break;
+    case Page::Controls:
+        SetPage(m_controlsReturnPage);
+        m_selected = std::min(m_controlsReturnSelection, m_rows.empty() ? size_t{0} : m_rows.size() - 1);
+        break;
     default: SetPage(Page::Home); break;
     }
 }
@@ -578,8 +627,26 @@ void Frontend::Input(uint32_t held, uint32_t pressed) {
         Back();
         return;
     }
+    if (pressed & ps5::Triangle) {
+        if (m_page == Page::Controls) {
+            Back();
+        } else if (m_page != Page::Confirm) {
+            m_controlsReturnPage = m_page;
+            m_controlsReturnSelection = m_selected;
+            SetPage(Page::Controls);
+        }
+        return;
+    }
+    if (m_page == Page::Controls) {
+        return;
+    }
+    if (m_page == Page::Home && (pressed & ps5::Square)) {
+        OpenLibrary();
+        return;
+    }
     const auto now = Clock::now();
-    const uint32_t direction = held & (ps5::Up | ps5::Down);
+    const uint32_t directions = ps5::Up | ps5::Down | (m_page == Page::Images ? ps5::Left | ps5::Right : 0);
+    const uint32_t direction = held & directions;
     if (direction != m_repeatDirection) {
         m_repeatDirection = direction;
         m_nextRepeat = now + 300ms;
@@ -590,7 +657,24 @@ void Frontend::Input(uint32_t held, uint32_t pressed) {
 
     if (!m_rows.empty()) {
         const size_t before = m_selected;
-        if ((pressed & ps5::Up) && m_selected) {
+        if (m_page == Page::Images) {
+            const size_t columns = ps5::kLibraryColumns;
+            const size_t last = m_rows.size() - 1;
+            const size_t pageSize = ps5::kLibraryPageSize;
+            if ((pressed & ps5::Up) && m_selected >= columns) {
+                m_selected -= columns;
+            } else if ((pressed & ps5::Down) && m_selected / columns < last / columns) {
+                m_selected = std::min(m_selected + columns, last);
+            } else if ((pressed & ps5::Left) && m_selected % columns != 0) {
+                --m_selected;
+            } else if ((pressed & ps5::Right) && m_selected % columns + 1 < columns && m_selected < last) {
+                ++m_selected;
+            } else if ((pressed & ps5::L1) && m_selected >= pageSize) {
+                m_selected -= pageSize;
+            } else if ((pressed & ps5::R1) && m_selected / pageSize < last / pageSize) {
+                m_selected = std::min(m_selected + pageSize, last);
+            }
+        } else if ((pressed & ps5::Up) && m_selected) {
             --m_selected;
         } else if ((pressed & ps5::Down) && m_selected + 1 < m_rows.size()) {
             ++m_selected;
@@ -608,7 +692,7 @@ void Frontend::Input(uint32_t held, uint32_t pressed) {
     }
 }
 
-int Frontend::Run(std::string_view source) {
+int Frontend::Run() {
     if (!m_video.Open(m_settings)) {
         return 1;
     }
@@ -633,9 +717,7 @@ int Frontend::Run(std::string_view source) {
                                           report.report.controlPad.buttons = MapButtons(*static_cast<uint32_t *>(ctx));
                                       }});
     OpenMenu();
-    if (!source.empty()) {
-        Boot(source);
-    }
+    Status(m_storage.SetupError());
     ps5::Report("Running. Touchpad opens the menu; L3+R3 exits");
 
     uint32_t previousButtons = 0;
@@ -650,7 +732,7 @@ int Frontend::Run(std::string_view source) {
             return 0;
         }
 
-        if (m_menuOpen) {
+        if (m_menuOpen && !m_usbMount.valid()) {
             const auto previousState = m_driveState;
             PollMedia();
             if (previousState != m_driveState &&
@@ -660,7 +742,7 @@ int Frontend::Run(std::string_view source) {
                 SetPage(Page::Saves);
             }
             Input(buttons, pressed);
-        } else if (pressed & ps5::Touchpad) {
+        } else if (!m_menuOpen && (pressed & ps5::Touchpad)) {
             OpenMenu();
         }
         if (!m_running) {
@@ -668,6 +750,32 @@ int Frontend::Run(std::string_view source) {
         }
 
         const auto now = Clock::now();
+        if (m_usbMount.valid()) {
+            // The mount worker owns the Saturn core until the reader is ready.
+            if (!m_usbFrameShown || m_usbMount.wait_for(0s) != std::future_status::ready) {
+                m_menu.DrawDiscLoading(std::chrono::duration<double>(now - m_usbStarted).count());
+                if (!m_video.PresentMenu(m_menu.Pixels())) {
+                    ps5::Report("Display presentation failed while reading a USB disc");
+                    return 1;
+                }
+                m_usbFrameShown = true;
+                std::this_thread::sleep_until(now + 33ms);
+                continue;
+            }
+            const bool mounted = m_usbMount.get();
+            if (!m_video.HasGpu()) {
+                m_settings.resolution = m_video.OutputResolution();
+                m_settings.fsr = false;
+                m_settings.frameGen = 0;
+                BuildRows();
+            }
+            if (mounted) {
+                FinishBoot("USB disc");
+            } else {
+                Status("Could not open the USB drive. Check its connection and CAM access.");
+            }
+        }
+
         const bool modeChanged = menuPreviouslyOpen != m_menuOpen;
         menuPreviouslyOpen = m_menuOpen;
         const double coreHz = CoreHz();
@@ -683,9 +791,44 @@ int Frontend::Run(std::string_view source) {
         const bool hadGpu = m_video.HasGpu();
         bool drawable = true;
         if (m_menuOpen) {
+            UpdateCovers();
             if (m_dirty) {
-                m_menu.Draw(m_title, m_detail, m_rows, m_selected, m_status,
-                            "Cruz  Aceptar    Círculo  Volver    Cruceta / stick  Mover    L1 / R1  Página");
+                std::vector<MenuHint> hints;
+                if (m_page != Page::Controls && !m_rows.empty()) {
+                    hints.push_back({MenuIcon::Cross, m_page == Page::Video ? "Change" : "Select"});
+                }
+                if (m_page != Page::Home || m_started) {
+                    hints.push_back({MenuIcon::Circle, m_page == Page::Home ? "Resume" : "Back"});
+                }
+                if (m_page == Page::Home) {
+                    hints.push_back({MenuIcon::Square, "Game library"});
+                }
+                if (m_page != Page::Controls && m_page != Page::Confirm) {
+                    hints.push_back({MenuIcon::Triangle, "Controls"});
+                }
+                if (m_page == Page::Controls) {
+                    hints.push_back({MenuIcon::None, "Touchpad  Pause"});
+                    hints.push_back({MenuIcon::None, "L3 + R3  Exit"});
+                } else {
+                    hints.push_back({MenuIcon::DPad, "Navigate"});
+                    const size_t visible = m_page == Page::Images ? ps5::kLibraryPageSize : ps5::kMenuVisibleRows;
+                    if (m_rows.size() > visible) {
+                        hints.push_back({MenuIcon::None, "L1 / R1  Page"});
+                    }
+                }
+                std::error_code error;
+                const bool biosPresent = m_hasBIOS || fs::file_size(ps5::FindBIOS(), error) == ymir::sys::kIPLSize;
+                if (m_page == Page::Images) {
+                    std::span<const ps5::CoverImage> covers;
+                    const size_t first = m_selected / ps5::kLibraryPageSize * ps5::kLibraryPageSize;
+                    if (m_libraryCovers.first == first) {
+                        covers = m_libraryCovers.images;
+                    }
+                    m_menu.DrawLibrary(m_detail, m_rows, m_selected, covers, m_status, biosPresent, hints);
+                } else {
+                    m_menu.Draw(m_title, m_detail, m_rows, m_selected, m_status, biosPresent, hints,
+                                m_page != Page::Controls);
+                }
                 m_dirty = false;
             }
             drawable = m_video.PresentMenu(m_menu.Pixels());
@@ -717,7 +860,7 @@ int Frontend::Run(std::string_view source) {
             m_settings.frameGen = 0;
             if (m_menuOpen && m_page != Page::Confirm) {
                 BuildRows();
-                Status("Se ha activado VideoOut tras un error de Vulkan.");
+                Status("Switched to VideoOut after a Vulkan error.");
             }
         }
         videoDeadline += period;
@@ -726,31 +869,11 @@ int Frontend::Run(std::string_view source) {
     return 0;
 }
 
-int Run(int argc, char **argv) {
-    if (argc > 3) {
-        ps5::Report("Usage: ymir-ps5.elf [saturn-bios.bin] [/dev/cdN or disc image]");
-        return 1;
-    }
-    fs::path bios = argc >= 2 ? argv[1] : kDefaultBIOS;
-    std::error_code error;
-    if (argc < 2 && !fs::exists(bios, error) && fs::exists("/download0/bios.bin", error)) {
-        bios = "/download0/bios.bin";
-    }
-    auto frontend = std::make_unique<Frontend>(std::move(bios));
-    return frontend->Run(argc >= 3 ? argv[2] : "");
-}
-
 } // namespace
 
-int main(int argc, char **argv) {
+int main(int, char **) {
     try {
-#if YMIR_PS5_NATIVE_TITLE
-        (void)argc;
-        (void)argv;
-        return Run(0, nullptr);
-#else
-        return Run(argc, argv);
-#endif
+        return std::make_unique<Frontend>()->Run();
     } catch (const std::exception &error) {
         ps5::Report(error.what());
         return 1;

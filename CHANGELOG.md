@@ -1,5 +1,11 @@
 # Ymir changelog
 
+## YmirPS5 0.6.0
+
+- Installable PS5 title with Vulkan, FSR 1, FSR 3 frame generation, and a dashboard icon.
+- English DualSense interface with a game grid and an offline catalog of Saturn box art.
+- First-launch setup under `/data/YmirPS5/` and an animated loading screen for USB discs.
+
 ## Version 0.4.2
 
 In development.

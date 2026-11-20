@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.28)
-project(Ymir VERSION 0.4.2)
+project(Ymir VERSION 0.6.0)
 
 # Workaround for a CMake issue involving Objective-C code: https://gitlab.kitware.com/cmake/cmake/-/work_items/24104
 if (APPLE)

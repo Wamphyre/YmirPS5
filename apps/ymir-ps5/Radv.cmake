@@ -1,10 +1,4 @@
-# Optional Vulkan presenter for the native title. The standard ELF keeps its VideoOut backend.
-set(Ymir_PS5_RADV_ROOT "" CACHE PATH "Unpacked radv-release directory from SwanStationPS5")
-set(Ymir_PS5_RADV_SDK "" CACHE PATH "Unpacked companion PS5 SDK with libps5platform.a")
-if (NOT Ymir_PS5_RADV_ROOT AND NOT Ymir_PS5_RADV_SDK)
-    return()
-endif ()
-
+# Vulkan presenter for the installable title.
 set(_swan "${Ymir_PS5_SWANSTATION_SOURCE}")
 set(_vk "${_swan}/src/platform/vk")
 set(_fg "${_swan}/third_party/framegen")
@@ -62,6 +56,8 @@ target_include_directories(ymir-ps5-pie PRIVATE "${_vk}" "${Ymir_PS5_RADV_ROOT}/
 target_compile_definitions(ymir-ps5-pie PRIVATE YMIR_PS5_GPU=1 SwanStationPS5_VULKAN=1)
 # Search RADV before the SDK's libc so only one C11 threads implementation is linked.
 target_link_options(ymir-ps5-pie PRIVATE -nodefaultlibs)
+# Mesa uses weak references for optional entry points. Missing ones must stay null in its dispatch tables.
+target_link_options(ymir-ps5-pie PRIVATE "LINKER:-z,nodynamic-undefined-weak")
 
 # Use the pinned driver's platform compatibility recipe for the SDK's missing libc functions.
 set(_recipe_root "${_radv_work}/recipe")

@@ -10,7 +10,7 @@
   "conceptId": "98567",
   "contentBadgeType": 1,
   "contentId": "UP9000-PPSA98567_00-YMIRPS5000000000",
-  "contentVersion": "00.004.003",
+  "contentVersion": "00.006.000",
   "downloadDataSize": 256,
   "gameIntent": {
     "permittedIntents": [
@@ -22,7 +22,7 @@
   "localizedParameters": {
     "defaultLanguage": "en-US",
     "en-US": {
-      "titleName": "Ymir PS5"
+      "titleName": "YmirPS5"
     }
   },
   "masterVersion": "01.00",

@@ -26,12 +26,17 @@ struct ImageEntry {
     bool folder;
 };
 
-std::vector<ImageEntry> ImageRoots(const std::filesystem::path &biosDirectory);
+std::filesystem::path FindBIOS();
+std::vector<ImageEntry> ImageRoots();
 std::vector<ImageEntry> ListImages(const std::filesystem::path &path, std::error_code &error);
 
 class Storage {
 public:
-    explicit Storage(const std::filesystem::path &bios);
+    Storage();
+
+    const std::string &SetupError() const {
+        return m_setupError;
+    }
 
     VideoSettings ReadVideoSettings() const;
     bool WriteVideoSettings(const VideoSettings &settings) const;
@@ -48,7 +53,7 @@ public:
     bool ImportMemory(ymir::Saturn &saturn) const;
 
 private:
-    std::filesystem::path m_biosDirectory;
+    std::string m_setupError;
     std::filesystem::path m_root;
     std::filesystem::path m_backupPath;
 };
