@@ -1024,6 +1024,10 @@ void CDBlock::ProcessDriveState() {
                 } else {
                     ProcessDriveStatePlay();
                 }
+            } else {
+                // Keep waiting at this phase so the next tick checks the seek result
+                // before reading. The old frame address can still point at a different file.
+                m_seekTicks = 2;
             }
         } else if (m_seekTicks == 0 && m_cdif.IsSeekDone()) {
             m_bufferFullPause = false;

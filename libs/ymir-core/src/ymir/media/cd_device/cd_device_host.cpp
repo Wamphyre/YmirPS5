@@ -151,8 +151,9 @@ DriveState HostCDDevice::PollDriveStateImpl() {
         m_cbOnMediaChanged();
     }
 
-    m_seekState.frameAddress = ts.seekFAD.load(std::memory_order_acquire);
+    // Acquire the completion counter before reading the result it publishes.
     m_seekState.committedCount = ts.seekCounter.load(std::memory_order_acquire);
+    m_seekState.frameAddress = ts.seekFAD.load(std::memory_order_relaxed);
 
     return m_driveState;
 }
@@ -319,10 +320,6 @@ void HostCDDevice::WorkerThread() {
     Command cmd{};
     bool running = true;
     while (running) {
-        // TODO: make this configurable
-        // 24 raw sectors fit in the 64 KiB CAM transfer limit and reduce the
-        // number of USB commands by a third compared to the old 16-sector batch.
-        static constexpr uint32 kMaxSectorFetchSize = 24;
         // Keep enough look-ahead for 2x CD data and audio. At 2x, 512 sectors
         // cover about 3.4 seconds (6.8 seconds for 1x audio), which absorbs USB
         // bridge latency spikes and short seeks without draining the cache.
@@ -331,7 +328,7 @@ void HostCDDevice::WorkerThread() {
         // After a seek only a small prime is buffered. Refill it in a small
         // batch first so the next sectors arrive before the prime drains; once
         // the cache is warmed up, use full-size USB transfers.
-        const uint32 sectorFetchSize = prefetched < 16 ? 8 : kMaxSectorFetchSize;
+        const uint32 sectorFetchSize = prefetched < 16 ? std::min(8u, m_maxReadBatch) : m_maxReadBatch;
 
         // Refill only when a full batch fits. Reading one sector at a time as
         // soon as one is consumed multiplies USB command overhead and causes
@@ -452,7 +449,7 @@ void HostCDDevice::InitializeWorkerDiscInfo() {
     std::unique_lock lock{ts.mtxDiscInfo};
 
     StopPrefetcher();
-    m_maxReadBatch = 24;
+    m_maxReadBatch = kDefaultReadBatch;
 #if defined(__PROSPERO__)
     m_useRawSubchannel = true;
 #endif
@@ -523,8 +520,6 @@ void HostCDDevice::ClearWorkerDiscInfo() {
 
 void HostCDDevice::SetSeekResult(uint32 counter, uint32 frameAddress) {
     auto &ts = m_threadState;
-    ts.seekFAD.store(std::max(frameAddress, 150u), std::memory_order_release);
-
     if (frameAddress != 0xFFFFFF) {
         StartPrefetcher(frameAddress);
 
@@ -541,7 +536,8 @@ void HostCDDevice::SetSeekResult(uint32 counter, uint32 frameAddress) {
         // retry once the drive is ready.
     }
 
-    // Report completion only after the target sectors are available.
+    // Publish the target and completion together after attempting to prime the cache.
+    ts.seekFAD.store(std::max(frameAddress, 150u), std::memory_order_relaxed);
     ts.seekCounter.store(counter, std::memory_order_release);
 }
 
@@ -754,7 +750,7 @@ DiscPosition HostCDDevice::DecodePosition(uint32 frameAddress, std::span<const u
 
     const auto subchannel = sector.subspan(kRawSectorSize);
     std::array<uint8, 12> subQ{};
-    for (uint32 i = 0; i < subchannel.size(); ++i) {
+    for (uint32 i = 0; i < subQ.size() * 8; ++i) {
         subQ[i >> 3u] |= bit::extract<6>(subchannel[i]) << (~i & 7u);
     }
     return {subQ[0], subQ[1], subQ[2], subQ[3], subQ[4], subQ[5], subQ[6], subQ[7], subQ[8], subQ[9]};
@@ -810,19 +806,17 @@ bool HostCDDevice::HostPrefetchSectors(uint32 frameAddress, uint32 sectorCount, 
     sectorCount = std::min(sectorCount, std::min(trackEnd - frameAddress + 1u, m_maxReadBatch));
     std::vector<uint8> data(kRawSectorWithSubchannel * sectorCount);
     uint32 sectorSize{};
-    if (!HostReadSectors(frameAddress, sectorCount, data, sectorSize)) {
-        // A service binary from an older installation accepts at most 16
-        // sectors per READ CD. Retry the batch at that size and remember it
-        // instead of failing every subsequent prefetch.
-        if (sectorCount > 16) {
-            sectorCount = 16;
-            if (!HostReadSectors(frameAddress, sectorCount, data, sectorSize)) {
-                return false;
-            }
-            m_maxReadBatch = 16;
-        } else {
+    const uint32 initialCount = sectorCount;
+    while (!HostReadSectors(frameAddress, sectorCount, data, sectorSize)) {
+        if (sectorCount == 1) {
             return false;
         }
+        // Some CAM bridges reject transfers above a size that is not exposed
+        // through the SCSI layer. Work down to a single sector if necessary.
+        sectorCount /= 2;
+    }
+    if (sectorCount < initialCount) {
+        m_maxReadBatch = sectorCount;
     }
 
     for (uint32 i = 0; i < sectorCount; ++i) {

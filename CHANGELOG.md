@@ -8,11 +8,12 @@ Released 2026-11-20.
 
 - Reduced stutter and slowdowns when streaming data and CD audio from USB optical drives:
     - Seeks now prime the host read cache before reporting completion, so the emulation thread no longer blocks on the first sector after a seek.
+    - Fixed a boot hang when a slow USB seek caused the emulated CD block to read from the previous sector address.
     - Cache misses preserve valid read-ahead instead of discarding the whole prefetch window; only real discontinuities restart it.
-    - Increased the read-ahead cache to 512 sectors and host read batches to 24 sectors.
+    - Increased the read-ahead cache to 512 sectors. Host reads start with batches of up to 16 sectors and retry smaller batches after a failed transfer.
     - `SET CD SPEED` now works through the loopback optical service and is applied after the TOC and disc header are read.
     - Reduced optical drive polling during playback.
-    - Added drive speed and read throughput diagnostics to `/data/YmirPS5/usb.log`.
+    - Added drive speed, read throughput, and sector addresses for failed or short reads to `/data/YmirPS5/usb.log`.
 - Reduced menu CPU/GPU work: the 1920x1080 menu is uploaded only when it changes, with a slow heartbeat for device events.
 - PS5 distribution builds now target the console's Zen 2 CPU with `-march=znver2 -mtune=znver2`, LTO/IPO, and aggressive inlining.
 

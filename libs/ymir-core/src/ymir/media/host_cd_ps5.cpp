@@ -220,7 +220,8 @@ namespace {
         std::memcpy(request.csio.cdb_io.cdb_bytes, cdb.data(), cdb.size());
 
         if (ioctl(device.fd, CAMIOCOMMAND, &request) < 0) {
-            Log("CAM command %02x: %s", cdb[0], std::strerror(errno));
+            Log("CAM command %02x (%u bytes): %s", cdb[0], static_cast<unsigned>(buffer.size()),
+                std::strerror(errno));
             return false;
         }
         if ((request.ccb_h.status & CAM_STATUS_MASK) != CAM_REQ_CMP || request.csio.resid > buffer.size()) {
@@ -248,15 +249,22 @@ namespace {
         if (!cdb.empty() && cdb[0] == scsi::op::kSetCDSpeed) {
             Log("SET CD SPEED (%s): %s", device.service ? "service" : "CAM", ok ? "accepted" : "rejected");
         }
-        if (ok && !cdb.empty() && cdb[0] == scsi::op::kReadCD && !buffer.empty()) {
-            device.readTimeUs += static_cast<uint64>(elapsedUs);
-            device.readBytes += size;
-            if (++device.readCommands % 64 == 0) {
-                const double seconds = static_cast<double>(device.readTimeUs) / 1'000'000.0;
-                const double kibPerSecond =
-                    seconds > 0 ? static_cast<double>(device.readBytes) / 1024.0 / seconds : 0.0;
-                Log("READ CD: %u commands, %llu KiB, %.1f KiB/s", device.readCommands,
-                    static_cast<unsigned long long>(device.readBytes / 1024), kibPerSecond);
+        if (cdb.size() == 12 && cdb[0] == scsi::op::kReadCD && !buffer.empty()) {
+            const uint32 lba = ps5disc::Read32(cdb.data() + 2);
+            const uint32 sectors = ps5disc::Read32(cdb.data() + 5) & 0xffffff;
+            if (!ok || size != buffer.size()) {
+                Log("READ CD LBA %u (%u sectors): %s, %u/%u bytes, sense %06x", lba, sectors,
+                    ok ? "short read" : "failed", size, static_cast<unsigned>(buffer.size()), sense);
+            } else {
+                device.readTimeUs += static_cast<uint64>(elapsedUs);
+                device.readBytes += size;
+                if (++device.readCommands % 64 == 0) {
+                    const double seconds = static_cast<double>(device.readTimeUs) / 1'000'000.0;
+                    const double kibPerSecond =
+                        seconds > 0 ? static_cast<double>(device.readBytes) / 1024.0 / seconds : 0.0;
+                    Log("READ CD: %u commands, %llu KiB, %.1f KiB/s (last LBA %u, %u sectors)", device.readCommands,
+                        static_cast<unsigned long long>(device.readBytes / 1024), kibPerSecond, lba, sectors);
+                }
             }
         }
 
