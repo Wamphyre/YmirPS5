@@ -82,11 +82,6 @@ std::vector<HostDriveInfo> EnumerateHostCDDrives();
 /// @return a list with the system's CD drives
 std::vector<HostDriveInfo> GetEnumeratedHostCDDrives();
 
-#if defined(__PROSPERO__)
-/// @brief Sets a diagnostics sink before opening any host CD device. Calls can come from a worker thread.
-void SetCDDriveLogCallback(void (*callback)(const char *message));
-#endif
-
 /// @brief Attempts to open a host CD drive at the specified path.
 /// @param[in] path the path to the CD drive
 /// @return a handle or file descriptor to the device, or the invalid sentinel value if failed.

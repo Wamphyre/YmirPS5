@@ -12,7 +12,6 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <cstdio>
 #include <cstring>
 #include <immintrin.h>
 #include <sys/mman.h>
@@ -93,28 +92,16 @@ constexpr int kWriteCombinedGarlic = 3;
 constexpr int kCPUGPUReadWrite = 0x33;
 constexpr uint64_t kRGBA8SRGB = 0x8000000022000000ull;
 
-bool CheckVideo(int result, const char *operation) {
-    if (result >= 0) {
-        return true;
-    }
-    char message[128];
-    std::snprintf(message, sizeof(message), "%s failed (0x%08x)", operation, static_cast<unsigned>(result));
-    ps5::Report(message);
-    return false;
-}
-
 ps5::Resolution DetectSystemResolution() {
     constexpr uint32_t kOutput2160p = 2;
     const int handle = sceVideoOutOpen(0xff, 0, 0, nullptr);
-    if (!CheckVideo(handle, "Opening VideoOut to detect the PS5 output mode")) {
+    if (handle < 0) {
         return ps5::Resolution::HD;
     }
     VideoOutputStatus status{};
     const int result = sceVideoOutGetOutputStatus(handle, &status);
     sceVideoOutClose(handle);
-    return CheckVideo(result, "sceVideoOutGetOutputStatus") && status.resolution == kOutput2160p
-               ? ps5::Resolution::UHD
-               : ps5::Resolution::HD;
+    return result >= 0 && status.resolution == kOutput2160p ? ps5::Resolution::UHD : ps5::Resolution::HD;
 }
 
 } // namespace
@@ -162,7 +149,6 @@ bool Video::OpenGPU(Resolution resolution, bool prefer120Hz) {
     for (int i = 0; i < (prefer120Hz ? 2 : 1); ++i) {
         char error[256]{};
         if (!ymir_gpu_open(width, height, kMenuWidth, kMenuHeight, prefer120Hz && i == 0, error, sizeof(error))) {
-            Report(error);
             continue;
         }
         if (ymir_gpu_matches(width, height)) {
@@ -210,9 +196,7 @@ bool Video::SelectOutput(Resolution resolution, bool prefer120Hz) {
     if (resolution != m_requestedResolution || prefer120Hz != m_requested120Hz) {
         m_requestedResolution = resolution;
         m_requested120Hz = prefer120Hz;
-        if (!SetOutput(resolution, prefer120Hz)) {
-            Report("The requested video mode is unavailable");
-        }
+        SetOutput(resolution, prefer120Hz);
     }
     return m_gpu || m_bufferSet >= 0;
 }
@@ -273,7 +257,7 @@ std::string Video::Description() const {
 bool Video::OpenCPU(Resolution resolution) {
     const auto [width, height] = OutputSize(resolution);
     m_handle = sceVideoOutOpen(0xff, 0, 0, nullptr);
-    if (!CheckVideo(m_handle, "sceVideoOutOpen")) {
+    if (m_handle < 0) {
         return false;
     }
 
@@ -281,16 +265,14 @@ bool Video::OpenCPU(Resolution resolution) {
     m_frameBytes = (tiles * kTileSize * kTileSize * sizeof(uint32_t) + kDirectAlign - 1) & ~(kDirectAlign - 1);
     const size_t bytes = m_frameBytes * kBufferCount;
     int64_t physical = 0;
-    if (!CheckVideo(sceKernelAllocateDirectMemory(0, sceKernelGetDirectMemorySize(), bytes, kDirectAlign,
-                                                  kWriteCombinedGarlic, &physical),
-                    "Video memory allocation")) {
+    if (sceKernelAllocateDirectMemory(0, sceKernelGetDirectMemorySize(), bytes, kDirectAlign,
+                                      kWriteCombinedGarlic, &physical) < 0) {
         return false;
     }
     m_physical = physical;
 
     void *memory = nullptr;
-    if (!CheckVideo(sceKernelMapDirectMemory(&memory, bytes, kCPUGPUReadWrite, 0, m_physical, kDirectAlign),
-                    "Video memory mapping")) {
+    if (sceKernelMapDirectMemory(&memory, bytes, kCPUGPUReadWrite, 0, m_physical, kDirectAlign) < 0) {
         return false;
     }
     m_memory = static_cast<uint32_t *>(memory);
@@ -312,11 +294,11 @@ bool Video::OpenCPU(Resolution resolution) {
     }
     VideoAttribute attr{};
     sceVideoOutSetBufferAttribute2(&attr, kRGBA8SRGB, 0, width, height, 0, 0, 0);
-    if (!CheckVideo(sceVideoOutSetFlipRate(m_handle, 0), "sceVideoOutSetFlipRate")) {
+    if (sceVideoOutSetFlipRate(m_handle, 0) < 0) {
         return false;
     }
     m_bufferSet = sceVideoOutRegisterBuffers2(m_handle, 0, 0, buffers.data(), buffers.size(), &attr, 0, nullptr);
-    if (!CheckVideo(m_bufferSet, "sceVideoOutRegisterBuffers2")) {
+    if (m_bufferSet < 0) {
         return false;
     }
     m_resolution = resolution;
@@ -369,7 +351,6 @@ bool Video::PresentGame(const VideoSettings &settings, bool emulatedFrame, doubl
                           rect.w * scaleX, rect.h * scaleY, !nativeScale && settings.fsr, settings.frameGen, coreHz)) {
             return true;
         }
-        Report("Vulkan could not present the game; switching to VideoOut");
         if (!RecoverCPU()) {
             return false;
         }
@@ -390,7 +371,6 @@ bool Video::PresentMenu(std::span<const uint32_t> pixels, bool prefer120Hz) {
         if (ymir_gpu_menu(pixels.data())) {
             return true;
         }
-        Report("Vulkan could not present the menu; switching to VideoOut");
         if (!RecoverCPU()) {
             return false;
         }
@@ -403,7 +383,7 @@ bool Video::PresentCPU(std::span<const uint32_t> pixels, unsigned width, unsigne
                        bool nativeScale) {
     // Keep at most one submitted flip in the queue.
     const int pending = sceVideoOutIsFlipPending(m_handle);
-    if (!CheckVideo(pending, "sceVideoOutIsFlipPending")) {
+    if (pending < 0) {
         return false;
     }
     if (pending > 0) {
@@ -454,7 +434,7 @@ bool Video::PresentCPU(std::span<const uint32_t> pixels, unsigned width, unsigne
     }
 
     _mm_sfence();
-    if (!CheckVideo(sceVideoOutSubmitFlip(m_handle, m_nextBuffer, 1, m_flip++), "sceVideoOutSubmitFlip")) {
+    if (sceVideoOutSubmitFlip(m_handle, m_nextBuffer, 1, m_flip++) < 0) {
         return false;
     }
     m_nextBuffer = (m_nextBuffer + 1) % kBufferCount;

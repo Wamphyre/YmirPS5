@@ -52,7 +52,7 @@ target_compile_features(ymir-ps5-framegen PRIVATE cxx_std_20)
 target_compile_options(ymir-ps5-framegen PRIVATE -include "${_fg}/bridge/fg_vk.h" -march=znver2)
 target_include_directories(ymir-ps5-framegen PRIVATE "${_fg}" "${_fg}/bridge" "${Ymir_PS5_RADV_ROOT}/include")
 target_sources(ymir-ps5-pie PRIVATE src/gpu.c "${_vk}/radv_sync.c")
-target_include_directories(ymir-ps5-pie PRIVATE "${_vk}" "${Ymir_PS5_RADV_ROOT}/include")
+target_include_directories(ymir-ps5-pie PRIVATE "${_vk}" "${_swan}/src" "${Ymir_PS5_RADV_ROOT}/include")
 target_compile_definitions(ymir-ps5-pie PRIVATE YMIR_PS5_GPU=1 SwanStationPS5_VULKAN=1)
 # Search RADV before the SDK's libc so only one C11 threads implementation is linked.
 target_link_options(ymir-ps5-pie PRIVATE -nodefaultlibs)

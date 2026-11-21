@@ -61,67 +61,54 @@ bool ServiceAnswers() {
     return answered;
 }
 
-bool SendPayloadToElfLoader(void (*report)(const char *)) {
+bool SendPayloadToElfLoader() {
     auto file = OpenPayload();
     if (!file) {
-        report("Could not find the packaged optical service");
         return false;
     }
     const std::streamsize size = file.tellg();
     if (size <= 0 || size > kMaxPayloadSize) {
-        report("The packaged optical service has an invalid size");
         return false;
     }
     std::vector<uint8> payload(static_cast<size_t>(size));
     file.seekg(0);
     if (!file.read(reinterpret_cast<char *>(payload.data()), size)) {
-        report("Could not read the packaged optical service");
         return false;
     }
 
     const int fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (fd < 0) {
-        report("Could not create a socket for the local ELF loader");
         return false;
     }
     const auto address = ElfLoaderAddress();
     if (!disc::ConfigureSocket(fd, 3) ||
         connect(fd, reinterpret_cast<const sockaddr *>(&address), sizeof(address)) < 0) {
-        report("The local ELF loader is unavailable; start the optical service manually");
         close(fd);
         return false;
     }
     const bool sent = disc::Send(fd, payload);
     close(fd);
-    if (!sent) {
-        report("Could not send the optical service to the local ELF loader");
-        return false;
-    }
-    return true;
+    return sent;
 }
 
 } // namespace
 
-bool EnsureDiscService(void (*report)(const char *)) {
+bool EnsureDiscService() {
     if (ServiceAnswers()) {
-        report("Optical service is already running");
         return true;
     }
 
-    report("Optical service is not running; asking the local ELF loader to start it");
-    if (!SendPayloadToElfLoader(report)) {
+    if (!SendPayloadToElfLoader()) {
         return false;
     }
 
     for (unsigned attempt = 0; attempt < 40; ++attempt) {
         if (ServiceAnswers()) {
-            report("Optical service is ready");
             return true;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds{250});
     }
 
-    report("The optical service started but did not answer; see /data/YmirPS5/disc-service.log");
     return false;
 }
 

@@ -13,8 +13,6 @@
 
 namespace ps5 {
 
-void Report(const char *message);
-
 class Video {
 public:
     ~Video();

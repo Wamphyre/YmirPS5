@@ -4,28 +4,17 @@
 #include "gpu.h"
 
 // Include the presenter so the upload can use the same graphics queue, fences, and swapchain lifecycle.
+#include <SwanStationPS5.h>
+#define SwanStationPS5_log(...) ((void)0)
 #include <vk_present.c>
+#undef SwanStationPS5_log
 
-#include <stdarg.h>
 #include <unistd.h>
 
-extern int sceKernelDebugOutText(int channel, const char *text);
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vk_icdGetInstanceProcAddr(VkInstance instance, const char *name);
 
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instance, const char *name) {
     return vk_icdGetInstanceProcAddr(instance, name);
-}
-
-void SwanStationPS5_log(const char *format, ...) {
-    char line[512];
-    const int prefix = snprintf(line, sizeof(line), "Ymir PS5: ");
-    va_list args;
-    va_start(args, format);
-    vsnprintf(line + prefix, sizeof(line) - prefix - 2, format, args);
-    va_end(args);
-    strcat(line, "\n");
-    fputs(line, stderr);
-    sceKernelDebugOutText(0, line);
 }
 
 static struct {
@@ -181,7 +170,6 @@ bool ymir_gpu_resize(unsigned width, unsigned height) {
     char error[256] = {0};
     release_upload();
     if (!vkp_set_mode(width, height, error, sizeof(error))) {
-        SwanStationPS5_log("Could not resize Vulkan output: %s", error);
         return false;
     }
     return ymir_gpu_matches(width, height);

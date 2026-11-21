@@ -13,10 +13,7 @@
 
 #include <array>
 #include <cstdint>
-#include <cstdio>
 #include <cerrno>
-#include <cstring>
-#include <string>
 #include <fstream>
 #include <string_view>
 #include <vector>
@@ -66,13 +63,6 @@ struct Message {
     Status status = Status::Ok;
 };
 static_assert(sizeof(Message) == 24);
-
-void Report(void (*log)(const char *), const std::string_view text) {
-    if (log != nullptr) {
-        const std::string copy{text};
-        log(copy.c_str());
-    }
-}
 
 sockaddr_in ElfLoaderAddress() {
     sockaddr_in address{};
@@ -124,7 +114,7 @@ bool Matches(const Message &message, const Message &request, Kind kind) {
            message.capability == request.capability;
 }
 
-bool ReadHelper(std::vector<std::uint8_t> &helper, void (*log)(const char *)) {
+bool ReadHelper(std::vector<std::uint8_t> &helper) {
     for (const auto path : kHelperPaths) {
         std::ifstream file(path.data(), std::ios::binary | std::ios::ate);
         if (!file) {
@@ -132,33 +122,26 @@ bool ReadHelper(std::vector<std::uint8_t> &helper, void (*log)(const char *)) {
         }
         const std::streamsize size = file.tellg();
         if (size <= 0 || size > kMaxHelperSize) {
-            Report(log, "The packaged Lapy helper has an invalid size");
             return false;
         }
         helper.resize(size_t(size));
         file.seekg(0);
-        if (!file.read(reinterpret_cast<char *>(helper.data()), size)) {
-            Report(log, "Could not read the packaged Lapy helper");
-            return false;
-        }
-        return true;
+        return bool(file.read(reinterpret_cast<char *>(helper.data()), size));
     }
-    Report(log, "Could not find the packaged Lapy helper");
     return false;
 }
 
 } // namespace
 
-LapyStatus LapyElevate(void (*log)(const char *)) {
+bool LapyElevate() {
     std::vector<std::uint8_t> helper;
-    if (!ReadHelper(helper, log)) {
-        return LapyStatus::HelperMissing;
+    if (!ReadHelper(helper)) {
+        return false;
     }
 
     const int fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (fd < 0) {
-        Report(log, "Could not create a socket for the local ELF loader");
-        return LapyStatus::TransportError;
+        return false;
     }
     const timeval receiveTimeout{15, 0};
     const timeval sendTimeout{10, 0};
@@ -169,37 +152,29 @@ LapyStatus LapyElevate(void (*log)(const char *)) {
 
     const auto address = ElfLoaderAddress();
     if (connect(fd, reinterpret_cast<const sockaddr *>(&address), sizeof(address)) < 0) {
-        Report(log, "The local ELF loader is unavailable for Lapy");
         close(fd);
-        return LapyStatus::LoaderUnavailable;
+        return false;
     }
 
     Message request{};
     request.pid = std::uint32_t(getpid());
     if (!SendAll(fd, helper.data(), helper.size()) || !SendAll(fd, &request, sizeof(request))) {
-        Report(log, "Could not send the Lapy helper to the local ELF loader");
         close(fd);
-        return LapyStatus::TransportError;
+        return false;
     }
 
     Message reply{};
     if (!ReceiveAll(fd, &reply, sizeof(reply))) {
-        Report(log, "The Lapy helper did not answer");
         close(fd);
-        return LapyStatus::TransportError;
+        return false;
     }
     if (Matches(reply, request, Kind::Response)) {
         close(fd);
-        if (reply.status != Status::Ok) {
-            Report(log, "The Lapy helper rejected the elevation request");
-            return LapyStatus::Rejected;
-        }
-        return LapyStatus::Granted;
+        return reply.status == Status::Ok;
     }
     if (!Matches(reply, request, Kind::Prepare) || reply.status != Status::Ok) {
-        Report(log, "The Lapy helper sent an unexpected request message");
         close(fd);
-        return LapyStatus::ProtocolError;
+        return false;
     }
 
     // The helper requires the target to clone its own credential now.
@@ -207,39 +182,17 @@ LapyStatus LapyElevate(void (*log)(const char *)) {
     prepared.kind = Kind::Prepared;
     prepared.status = seteuid(geteuid()) == 0 ? Status::Ok : Status::PrepareFailed;
     if (!SendAll(fd, &prepared, sizeof(prepared))) {
-        Report(log, "Could not finish the Lapy credential exchange");
         close(fd);
-        return LapyStatus::TransportError;
+        return false;
     }
 
     Message response{};
     if (!ReceiveAll(fd, &response, sizeof(response))) {
-        Report(log, "The Lapy helper stopped before confirming the elevation");
         close(fd);
-        return LapyStatus::TransportError;
+        return false;
     }
     close(fd);
-    if (!Matches(response, request, Kind::Response)) {
-        Report(log, "The Lapy helper sent an unexpected response");
-        return LapyStatus::ProtocolError;
-    }
-    if (prepared.status != Status::Ok || response.status != Status::Ok) {
-        Report(log, "The Lapy helper could not elevate this title");
-        return LapyStatus::Rejected;
-    }
-    return LapyStatus::Granted;
-}
-
-const char *DescribeLapy(LapyStatus status) {
-    switch (status) {
-    case LapyStatus::Granted: return "granted";
-    case LapyStatus::HelperMissing: return "helper missing";
-    case LapyStatus::LoaderUnavailable: return "ELF loader unavailable";
-    case LapyStatus::Rejected: return "rejected";
-    case LapyStatus::ProtocolError: return "protocol error";
-    case LapyStatus::TransportError: return "transport error";
-    }
-    return "unknown";
+    return Matches(response, request, Kind::Response) && prepared.status == Status::Ok && response.status == Status::Ok;
 }
 
 } // namespace ps5

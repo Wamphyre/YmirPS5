@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "ymir/media/host_cd_ps5_service.hpp"
 
-#include <cstdio>
-#include <cstring>
+#include <cerrno>
 #include <unistd.h>
 
 namespace host = ymir::media::host;
 namespace disc = host::ps5disc;
 
 namespace {
-
-void Report(const char *message) {
-    if (auto *file = std::fopen("/data/YmirPS5/disc-service.log", "a")) {
-        std::fprintf(file, "%s\n", message);
-        std::fclose(file);
-    } else {
-        std::fprintf(stderr, "YmirPS5 optical service: %s\n", message);
-    }
-}
 
 void Serve(int client, host::DeviceHandle drive) {
     if (!disc::ConfigureSocket(client, 300) || !disc::Send(client, disc::kHello)) {
@@ -55,21 +45,16 @@ void Serve(int client, host::DeviceHandle drive) {
 
 int main(int argc, char *argv[]) {
     if (argc > 2) {
-        std::fprintf(stderr, "Usage: ymir-ps5-disc.self [/dev/cdN or /dev/passN]\n");
         return 1;
     }
     const std::string path = argc == 2 ? argv[1] : "";
-    host::SetCDDriveLogCallback(Report);
-    Report("Checking for optical CAM access");
     auto drive = disc::OpenServiceDrive(path);
     if (drive == host::kInvalidDeviceHandle) {
-        Report("Could not open an optical drive in the service's environment");
         return 1;
     }
 
     const int listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (listener < 0) {
-        Report(std::strerror(errno));
         host::CloseDeviceHandle(drive);
         return 1;
     }
@@ -77,12 +62,10 @@ int main(int argc, char *argv[]) {
     const int one = 1;
     if (setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)) < 0 ||
         bind(listener, reinterpret_cast<const sockaddr *>(&address), sizeof(address)) < 0 || listen(listener, 2) < 0) {
-        Report(std::strerror(errno));
         close(listener);
         host::CloseDeviceHandle(drive);
         return 1;
     }
-    Report("Ready for YmirPS5 on loopback");
 
     for (;;) {
         const int client = accept(listener, nullptr, nullptr);
@@ -90,7 +73,6 @@ int main(int argc, char *argv[]) {
             if (errno == EINTR) {
                 continue;
             }
-            Report(std::strerror(errno));
             break;
         }
         if (drive == host::kInvalidDeviceHandle) {

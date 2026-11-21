@@ -20,9 +20,6 @@
 
 #include <chrono>
 #include <cstdio>
-#include <cstring>
-#include <fstream>
-#include <string>
 #include <thread>
 
 namespace ps5 {
@@ -36,15 +33,6 @@ constexpr const char *kRequests[]{
 constexpr const char *kCrashMarker = "/download0/YmirPS5_unlock_attempt";
 constexpr unsigned kPollCount = 60;
 constexpr auto kPollInterval = std::chrono::milliseconds{16};
-
-std::ofstream g_log;
-
-void Log(const char *message) {
-    if (g_log) {
-        g_log << message << '\n';
-        g_log.flush();
-    }
-}
 
 bool DataListable() {
     DIR *directory = opendir("/data");
@@ -142,16 +130,14 @@ bool RequestOverTcp(int pid) {
     return answered;
 }
 
-UnlockStatus RequestEtaHen() {
+bool RequestEtaHen() {
     if (seteuid(geteuid()) != 0) {
-        Log("etaHEN: could not clone this process's credential");
-        return UnlockStatus::CannotRequest;
+        return false;
     }
     if (access(kCrashMarker, F_OK) == 0) {
         // A previous launch died while asking. Skip one launch to avoid a loop.
         unlink(kCrashMarker);
-        Log("etaHEN: skipped once after the previous request closed the app");
-        return UnlockStatus::SkippedAfterCrash;
+        return false;
     }
     const int marker = open(kCrashMarker, O_WRONLY | O_CREAT | O_TRUNC, 0666);
     if (marker >= 0) {
@@ -160,72 +146,31 @@ UnlockStatus RequestEtaHen() {
     }
 
     const int pid = static_cast<int>(getpid());
-    UnlockStatus result = UnlockStatus::NoAnswer;
-    for (unsigned round = 0; round < 3 && result != UnlockStatus::Granted; ++round) {
+    bool granted = false;
+    for (unsigned round = 0; round < 3 && !granted; ++round) {
         unsigned published = 0;
         for (const char *path : kRequests) {
             published += Publish(path, pid) ? 1 : 0;
         }
         if (published == 0) {
-            result = UnlockStatus::CannotRequest;
             break;
         }
-        if (WaitUnlocked()) {
-            result = UnlockStatus::Granted;
-        } else if (round == 0 && RequestOverTcp(pid) && WaitUnlocked()) {
-            result = UnlockStatus::Granted;
-        }
+        granted = WaitUnlocked() || (round == 0 && RequestOverTcp(pid) && WaitUnlocked());
         for (const char *path : kRequests) {
             unlink(path);
         }
     }
     unlink(kCrashMarker);
-    return result;
+    return granted;
 }
 
 } // namespace
 
-UnlockStatus UnlockSandbox() {
-    mkdir("/data/YmirPS5", 0777);
-    g_log.open("/data/YmirPS5/unlock.log", std::ios::trunc);
-
-    if (Unlocked()) {
-        Log("Sandbox: already unlocked");
-        return UnlockStatus::AlreadyUnlocked;
+void UnlockSandbox() {
+    if (!Unlocked() && !RequestEtaHen() && LapyElevate()) {
+        // Give the new credential time to take effect before the app starts its workers.
+        WaitUnlocked();
     }
-    Log("Sandbox: /dev is hidden; requesting an on-demand jailbreak from etaHEN");
-
-    UnlockStatus result = RequestEtaHen();
-    if (result == UnlockStatus::Granted) {
-        Log("etaHEN: jailbreak granted");
-        return result;
-    }
-    Log(("etaHEN: " + std::string(DescribeUnlock(result))).c_str());
-
-    Log("Lapy: trying the packaged owned-root helper through the local ELF loader");
-    const auto lapy = LapyElevate(Log);
-    if (lapy == LapyStatus::Granted) {
-        if (WaitUnlocked()) {
-            Log("Lapy: elevation granted");
-            return UnlockStatus::LapyGranted;
-        }
-        Log("Lapy: elevation granted but /dev is still hidden");
-    } else {
-        Log((std::string("Lapy: ") + DescribeLapy(lapy)).c_str());
-    }
-    return UnlockStatus::NoAnswer;
-}
-
-const char *DescribeUnlock(UnlockStatus status) {
-    switch (status) {
-    case UnlockStatus::AlreadyUnlocked: return "already unlocked";
-    case UnlockStatus::Granted: return "granted by etaHEN";
-    case UnlockStatus::LapyGranted: return "granted by Lapy";
-    case UnlockStatus::NoAnswer: return "no unlock service answered";
-    case UnlockStatus::CannotRequest: return "could not write the unlock request";
-    case UnlockStatus::SkippedAfterCrash: return "skipped once after the previous request closed the app";
-    }
-    return "unknown";
 }
 
 } // namespace ps5

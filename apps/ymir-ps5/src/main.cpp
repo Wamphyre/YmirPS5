@@ -17,7 +17,6 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
-#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -36,39 +35,21 @@ using ymir::media::DriveState;
 using ps5::MenuHint;
 using ps5::MenuIcon;
 
-constexpr char kUSBLogPath[] = "/data/YmirPS5/usb.log";
-
-void ReportUSB(const char *message) {
-    ps5::Report(message);
-    if (auto *file = std::fopen(kUSBLogPath, "a")) {
-        std::fprintf(file, "%s\n", message);
-        std::fclose(file);
-    }
-}
-
 bool LoadBIOS(ymir::Saturn &saturn, const fs::path &path, const fs::path &backup) {
     auto rom = std::make_unique<std::array<uint8, ymir::sys::kIPLSize>>();
     std::ifstream file(path, std::ios::binary);
     if (!file.read(reinterpret_cast<char *>(rom->data()), rom->size()) ||
         file.peek() != std::ifstream::traits_type::eof()) {
-        ps5::Report(("Expected a 512 KiB Saturn BIOS at " + path.string()).c_str());
         return false;
     }
     saturn.LoadIPL(*rom);
 
     std::error_code error;
     saturn.LoadInternalBackupMemoryImage(backup, false, error);
-    if (error) {
-        ps5::Report(("Internal backup RAM will be volatile: " + error.message()).c_str());
-    }
     return true;
 }
 
 std::string MountUSB(ymir::Saturn &saturn) {
-    if (auto *file = std::fopen(kUSBLogPath, "w")) {
-        std::fclose(file);
-    }
-    ReportUSB("Looking for an optical drive");
     const auto mount = [&saturn](const std::vector<ymir::media::host::HostDriveInfo> &drives) {
         for (bool discPresent : {true, false}) {
             for (const auto &drive : drives) {
@@ -76,11 +57,8 @@ std::string MountUSB(ymir::Saturn &saturn) {
                     continue;
                 }
                 if (saturn.OpenHostCDDrive(drive.path, true)) {
-                    const auto &disc = saturn.GetCDInterface();
-                    ReportUSB(("Saturn CD ready on " + drive.path + ": " + disc.GetDiscHeader().gameTitle).c_str());
                     return true;
                 }
-                ReportUSB(("Could not read a Saturn CD from " + drive.path).c_str());
             }
         }
         return false;
@@ -95,7 +73,7 @@ std::string MountUSB(ymir::Saturn &saturn) {
     // devices. The service runs from the ELF loader and opens the reader with
     // its own process permissions, so retry through it when direct access fails.
 #if Ymir_FF_HOST_CD_DRIVES
-    if (ps5::EnsureDiscService(ReportUSB)) {
+    if (ps5::EnsureDiscService()) {
         drives = ymir::media::host::EnumerateHostCDDrives();
         if (mount(drives)) {
             return {};
@@ -103,10 +81,8 @@ std::string MountUSB(ymir::Saturn &saturn) {
     }
 #endif
 
-    const std::string reason = drives.empty() ? "No accessible USB optical drive."
-                                              : "Reader found, but no readable Saturn game disc.";
-    ReportUSB(reason.c_str());
-    return reason + " See /data/YmirPS5/usb.log.";
+    return drives.empty() ? "No accessible USB optical drive."
+                          : "Reader found, but no readable Saturn game disc.";
 }
 
 Button MapButtons(uint32_t buttons) {
@@ -149,7 +125,7 @@ public:
         , m_audioSettings(m_storage.ReadAudioSettings())
         , m_saturn(std::make_unique<ymir::Saturn>()) {}
 
-    int Run(std::ofstream &launchLog);
+    int Run();
 
 private:
     bool EnsureBIOS();
@@ -247,9 +223,7 @@ bool Frontend::EnsureBIOS() {
     }
     m_saturn->SMPC.SetPersistDataCallback({&m_storage,
         [](const ymir::smpc::PersistentSMPCData &data, void *context) {
-            if (!static_cast<const ps5::Storage *>(context)->WriteSystemSettings(data)) {
-                ps5::Report("Could not save the Saturn clock and system settings");
-            }
+            static_cast<const ps5::Storage *>(context)->WriteSystemSettings(data);
         }});
     return true;
 }
@@ -267,8 +241,7 @@ bool Frontend::Boot(std::string_view source) {
     }
 
     ymir::media::Disc disc;
-    if (!ymir::media::LoadDisc(fs::path(source), disc, false,
-                               [](auto, const std::string &message) { ps5::Report(message.c_str()); })) {
+    if (!ymir::media::LoadDisc(fs::path(source), disc, false, [](auto, const std::string &) {})) {
         Status("Could not open the disc image. Check its format and companion files.");
         return false;
     }
@@ -326,16 +299,9 @@ void Frontend::PollMedia() {
     if (state == m_driveState) {
         return;
     }
-    if (state == DriveState::MediaPresent) {
-        if (cd.GetDiscHeader().IsValid()) {
-            m_saturn->AutodetectRegion();
-            m_game = cd.GetDiscHeader().gameTitle;
-            ps5::Report(("Saturn disc: " + m_game).c_str());
-        } else {
-            ps5::Report("Disc present, but no Saturn header could be read");
-        }
-    } else if (m_driveState == DriveState::MediaPresent) {
-        ps5::Report("Disc removed");
+    if (state == DriveState::MediaPresent && cd.GetDiscHeader().IsValid()) {
+        m_saturn->AutodetectRegion();
+        m_game = cd.GetDiscHeader().gameTitle;
     }
     m_driveState = state;
 }
@@ -346,9 +312,6 @@ double Frontend::CoreHz() const {
 }
 
 void Frontend::Status(std::string text) {
-    if (!text.empty()) {
-        ps5::Report(text.c_str());
-    }
     m_status = std::move(text);
     m_dirty = true;
 }
@@ -499,7 +462,6 @@ void Frontend::Browse(const fs::path &directory) {
     std::error_code error;
     auto entries = directory.empty() ? ps5::ImageRoots() : ps5::ListImages(directory, error);
     if (error) {
-        ps5::Report(("Library scan " + directory.string() + ": " + error.message()).c_str());
         Status("Could not open this folder  " + directory.string());
         return;
     }
@@ -871,16 +833,11 @@ void Frontend::Input(uint32_t held, uint32_t pressed) {
     }
 }
 
-int Frontend::Run(std::ofstream &launchLog) {
-    launchLog << "Opening video" << std::endl;
+int Frontend::Run() {
     if (!m_video.Open(m_settings)) {
-        launchLog << "Video initialization failed" << std::endl;
         return 1;
     }
-    launchLog << m_video.Description() << std::endl;
-    if (!m_pad.Open()) {
-        ps5::Report("Could not open the active user's controller");
-    }
+    m_pad.Open();
     m_saturn->VDP.UseSoftwareRenderer();
     m_saturn->VDP.SetSoftwareRenderCallback({&m_video, [](uint32 *data, uint32 w, uint32 h, void *context) {
                                                  static_cast<ps5::Video *>(context)->CopyFrame(data, w, h);
@@ -890,8 +847,6 @@ int Frontend::Run(std::ofstream &launchLog) {
         m_saturn->SCSP.SetSampleCallback({&m_audio, [](sint16 left, sint16 right, void *context) {
                                               static_cast<ps5::Audio *>(context)->PushSample(left, right);
                                           }});
-    } else {
-        ps5::Report("Could not open AudioOut; continuing without audio");
     }
 
     auto &port = m_saturn->SMPC.GetPeripheralPort1();
@@ -901,8 +856,6 @@ int Frontend::Run(std::ofstream &launchLog) {
                                       }});
     OpenMenu();
     Status(m_storage.SetupError());
-    ps5::Report("Running. L3+R3 or Touchpad opens the game menu");
-    launchLog << "Menu initialized" << std::endl;
 
     uint32_t previousButtons = 0;
     auto videoDeadline = Clock::now();
@@ -942,7 +895,6 @@ int Frontend::Run(std::ofstream &launchLog) {
             if (!m_usbFrameShown || m_usbMount.wait_for(0s) != std::future_status::ready) {
                 m_menu.DrawDiscLoading(std::chrono::duration<double>(now - m_usbStarted).count());
                 if (!m_video.PresentMenu(m_menu.Pixels(), m_settings.frameGen != 0)) {
-                    ps5::Report("Display presentation failed while reading a USB disc");
                     return 1;
                 }
                 m_usbFrameShown = true;
@@ -1043,13 +995,7 @@ int Frontend::Run(std::ofstream &launchLog) {
             drawable = m_video.PresentGame(m_settings, due, coreHz);
         }
         if (!drawable) {
-            ps5::Report("Display presentation failed");
-            launchLog << "First frame presentation failed" << std::endl;
             return 1;
-        }
-        if (launchLog.is_open()) {
-            launchLog << "First menu frame submitted" << std::endl;
-            launchLog.close();
         }
         if (hadGpu && !m_video.HasGpu()) {
             if (m_menuOpen && m_page != Page::Confirm) {
@@ -1060,7 +1006,6 @@ int Frontend::Run(std::ofstream &launchLog) {
         videoDeadline += period;
         std::this_thread::sleep_until(videoDeadline);
     }
-    ps5::Report("Exit requested");
     return 0;
 }
 
@@ -1068,28 +1013,20 @@ int Frontend::Run(std::ofstream &launchLog) {
 
 int main(int, char **) {
     // The shell keeps pic1.dds visible until the title releases its boot splash.
-    std::ofstream launchLog("/data/YmirPS5/launch.log");
-    launchLog << "YmirPS5 started" << std::endl;
-    const int splashResult = sceSystemServiceHideSplashScreen();
-    launchLog << "HideSplashScreen returned " << splashResult << std::endl;
+    sceSystemServiceHideSplashScreen();
 
     // The sandbox hides /dev, including the CAM nodes of a USB optical reader.
     // Ask the console's unlock service before this process starts any thread.
-    const auto unlock = ps5::UnlockSandbox();
-    launchLog << "Sandbox unlock: " << ps5::DescribeUnlock(unlock) << std::endl;
-    ymir::media::host::SetCDDriveLogCallback(ReportUSB);
+    ps5::UnlockSandbox();
     try {
-        return std::make_unique<Frontend>()->Run(launchLog);
-    } catch (const std::exception &error) {
-        ps5::Report(error.what());
-        launchLog << error.what() << std::endl;
+        return std::make_unique<Frontend>()->Run();
+    } catch (const std::exception &) {
         return 1;
     }
 }
 
 // The native CRT calls this after main and would otherwise terminate with libc exit().
 extern "C" [[noreturn]] void catchReturnFromMain(int) {
-    ps5::Report("Returning to the PS5 home screen");
     for (;;) {
         sceSystemServiceLoadExec("exit", nullptr);
         std::this_thread::sleep_for(std::chrono::seconds{1});

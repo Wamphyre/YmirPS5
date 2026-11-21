@@ -13,10 +13,10 @@ Released 2026-11-20.
     - Increased the read-ahead cache to 512 sectors. Host reads start with batches of up to 16 sectors and retry smaller batches after a failed transfer.
     - `SET CD SPEED` now works through the loopback optical service and is applied after the TOC and disc header are read.
     - Reduced optical drive polling during playback.
-    - Added drive speed, read throughput, and sector addresses for failed or short reads to `/data/YmirPS5/usb.log`.
 - Reduced menu CPU/GPU work: the 1920x1080 menu is uploaded only when it changes, with a slow heartbeat for device events.
 - Added an in-game menu on L3 + R3 and Touchpad with options to resume, close, restart, save, load, and exit.
 - Reduced VideoOut fallback scaling work by handling full picture tiles and black borders in bulk.
+- Removed PS5 runtime logging, including the optical service logs and USB read counters.
 - PS5 distribution builds now target the console's Zen 2 CPU with `-march=znver2 -mtune=znver2`, LTO/IPO, and aggressive inlining.
 
 ## YmirPS5 0.7.1

@@ -5,7 +5,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
-#include <cstdio>
 #include <numbers>
 
 namespace {
@@ -24,7 +23,6 @@ static_assert(sizeof(PadState) == 512);
 static_assert(offsetof(PadState, connected) == 76);
 
 extern "C" {
-int sceKernelDebugOutText(int channel, const char *text);
 int sceUserServiceInitialize(const void *params);
 int sceUserServiceGetInitialUser(int *user);
 int sceUserServiceTerminate();
@@ -59,13 +57,6 @@ auto MakeMenuCue(float firstHz, float secondHz, unsigned durationMs) {
 } // namespace
 
 namespace ps5 {
-
-void Report(const char *message) {
-    std::fprintf(stderr, "Ymir PS5: %s\n", message);
-    char line[512];
-    std::snprintf(line, sizeof(line), "Ymir PS5: %s\n", message);
-    sceKernelDebugOutText(0, line);
-}
 
 Pad::~Pad() {
     if (m_handle >= 0) {
@@ -238,7 +229,6 @@ void Audio::Playback() {
             }
         }
         if (sceAudioOutOutput(m_handle, grain.data()) < 0) {
-            Report("AudioOut stopped accepting samples");
             return;
         }
     }

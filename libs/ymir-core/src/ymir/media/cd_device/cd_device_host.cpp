@@ -473,8 +473,7 @@ void HostCDDevice::InitializeWorkerDiscInfo() {
         // USB drives spin data CDs slowly until asked for speed. Saturn FMV
         // needs 2x continuously, so request the drive's maximum read speed.
         // Send this after the TOC/header reads: some bridges reject commands
-        // sent while the unit is still spinning up. The transport layer logs
-        // the result so a rejected SET CD SPEED is visible in usb.log.
+        // sent while the unit is still spinning up.
         const auto setSpeed = scsi::op::MakeSetCDSpeed();
         uint32 speedReadSize{};
         if (!host::SendSCSIInCommand(m_devHandle, setSpeed, {}, speedReadSize)) {

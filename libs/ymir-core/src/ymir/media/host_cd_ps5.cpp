@@ -17,12 +17,9 @@
 #include <cam/scsi/scsi_message.h>
 #include <cam/scsi/scsi_pass.h>
 
-#include <atomic>
 #include <cerrno>
 #include <charconv>
 #include <chrono>
-#include <cstdarg>
-#include <cstdio>
 #include <cstring>
 #include <fcntl.h>
 #include <memory>
@@ -53,12 +50,6 @@ struct CAMDevice {
     DriveState driveState = DriveState::Unknown;
     bool mediumChanged = false;
     std::chrono::steady_clock::time_point nextPoll{};
-
-    // Diagnostics for usb.log. Accessed only by the worker thread that owns
-    // this device.
-    uint64 readBytes = 0;
-    uint64 readTimeUs = 0;
-    uint32 readCommands = 0;
 };
 
 namespace {
@@ -68,41 +59,23 @@ namespace {
     constexpr uint32 kMaxTransfer = 64 * 1024;
     std::mutex g_drivesMutex;
     std::vector<HostDriveInfo> g_drives;
-    void (*g_logCallback)(const char *) = nullptr;
-    std::atomic<unsigned> g_logCount{0};
-
-    void Log(const char *format, ...) {
-        if (g_logCallback == nullptr || g_logCount.fetch_add(1, std::memory_order_relaxed) >= 256) {
-            return;
-        }
-        char buffer[256];
-        va_list args;
-        va_start(args, format);
-        std::vsnprintf(buffer, sizeof(buffer), format, args);
-        va_end(args);
-        g_logCallback(buffer);
-    }
 
     DeviceHandle OpenService() {
         const int fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
         if (fd < 0) {
-            Log("Cannot create an optical service socket: %s", std::strerror(errno));
             return kInvalidDeviceHandle;
         }
         auto connection = std::make_unique<CAMDevice>(fd);
         const auto address = ps5disc::LocalAddress();
         if (!ps5disc::ConfigureSocket(fd, 15) ||
             connect(fd, reinterpret_cast<const sockaddr *>(&address), sizeof(address)) < 0) {
-            Log("Local optical service unavailable: %s", std::strerror(errno));
             return kInvalidDeviceHandle;
         }
         std::array<uint8, ps5disc::kHello.size()> hello{};
         if (!ps5disc::Receive(fd, hello) || hello != ps5disc::kHello) {
-            Log("Local optical service did not confirm an accessible drive");
             return kInvalidDeviceHandle;
         }
         connection->service = true;
-        Log("Connected to the local optical service");
         return connection.release();
     }
 
@@ -131,7 +104,6 @@ namespace {
                 return success == 1;
             }
         }
-        Log("Lost the local optical service connection");
         close(device.fd);
         device.fd = -1;
         return false;
@@ -220,16 +192,10 @@ namespace {
         std::memcpy(request.csio.cdb_io.cdb_bytes, cdb.data(), cdb.size());
 
         if (ioctl(device.fd, CAMIOCOMMAND, &request) < 0) {
-            Log("CAM command %02x (%u bytes): %s", cdb[0], static_cast<unsigned>(buffer.size()),
-                std::strerror(errno));
             return false;
         }
         if ((request.ccb_h.status & CAM_STATUS_MASK) != CAM_REQ_CMP || request.csio.resid > buffer.size()) {
             sense = ReadSense(request.csio);
-            if (cdb[0] != 0 || sense == 0) {
-                Log("CAM command %02x: status %x, SCSI %02x, sense %06x, residual %u", cdb[0],
-                    request.ccb_h.status, request.csio.scsi_status, sense, request.csio.resid);
-            }
             return false;
         }
         size = buffer.size() - request.csio.resid;
@@ -240,56 +206,25 @@ namespace {
                      uint32 &sense) {
         size = 0;
         sense = 0;
-        const auto started = std::chrono::steady_clock::now();
         const bool ok = device.service ? ReadThroughService(device, cdb, buffer, size, sense)
                                        : SendCAMCommand(device, cdb, buffer, size, sense);
-        const auto elapsedUs =
-            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started).count();
-
-        if (!cdb.empty() && cdb[0] == scsi::op::kSetCDSpeed) {
-            Log("SET CD SPEED (%s): %s", device.service ? "service" : "CAM", ok ? "accepted" : "rejected");
-        }
-        if (cdb.size() == 12 && cdb[0] == scsi::op::kReadCD && !buffer.empty()) {
-            const uint32 lba = ps5disc::Read32(cdb.data() + 2);
-            const uint32 sectors = ps5disc::Read32(cdb.data() + 5) & 0xffffff;
-            if (!ok || size != buffer.size()) {
-                Log("READ CD LBA %u (%u sectors): %s, %u/%u bytes, sense %06x", lba, sectors,
-                    ok ? "short read" : "failed", size, static_cast<unsigned>(buffer.size()), sense);
-            } else {
-                device.readTimeUs += static_cast<uint64>(elapsedUs);
-                device.readBytes += size;
-                if (++device.readCommands % 64 == 0) {
-                    const double seconds = static_cast<double>(device.readTimeUs) / 1'000'000.0;
-                    const double kibPerSecond =
-                        seconds > 0 ? static_cast<double>(device.readBytes) / 1024.0 / seconds : 0.0;
-                    Log("READ CD: %u commands, %llu KiB, %.1f KiB/s (last LBA %u, %u sectors)", device.readCommands,
-                        static_cast<unsigned long long>(device.readBytes / 1024), kibPerSecond, lba, sectors);
-                }
-            }
-        }
-
         if (!ok && ((sense >> 8) == 0x0628 || (sense >> 8) == 0x023a)) {
             device.mediumChanged = true;
         }
         return ok;
     }
 
-    DeviceHandle OpenPass(const std::string &path, bool reportMissing = true,
-                          const ccb_hdr *address = nullptr) {
+    DeviceHandle OpenPass(const std::string &path, const ccb_hdr *address = nullptr) {
         int fd = open(path.c_str(), O_RDWR);
         if (fd < 0 && (errno == EACCES || errno == EPERM || errno == EROFS)) {
             fd = open(path.c_str(), O_RDONLY);
         }
         if (fd < 0) {
-            if (errno != ENOENT || reportMissing) {
-                Log("open %s: %s", path.c_str(), std::strerror(errno));
-            }
             return kInvalidDeviceHandle;
         }
         auto device = std::make_unique<CAMDevice>(fd);
         union ccb request{};
         if (!address && ioctl(fd, CAMGETPASSTHRU, &request) < 0) {
-            Log("CAMGETPASSTHRU on %s: %s", path.c_str(), std::strerror(errno));
             return kInvalidDeviceHandle;
         }
         const auto &cam = address ? *address : request.ccb_h;
@@ -301,28 +236,20 @@ namespace {
         uint32 size{};
         if (!SendSCSIInCommand(device.get(), scsi::op::MakeInquiry(inquiry.size()), inquiry, size) ||
             size < 32 || (inquiry[0] & 0x1f) != 5) {
-            Log("%s did not identify as an optical reader", path.c_str());
             return kInvalidDeviceHandle;
         }
         const std::string_view model{reinterpret_cast<const char *>(inquiry.data() + 8), 24};
         if (model.find("PS-SYSTEM") != std::string_view::npos) {
-            Log("%s is the console's internal drive", path.c_str());
             return kInvalidDeviceHandle;
         }
         device->passPath = path;
-        Log("%s: %.24s (CAM path %u, target %u, LUN %u)", path.c_str(), model.data(), unsigned(device->path),
-            unsigned(device->target), unsigned(device->lun));
         return device.release();
     }
 
 } // namespace
 
-void SetCDDriveLogCallback(void (*callback)(const char *message)) {
-    g_logCallback = callback;
-}
-
 // Resolve the cd unit on the CAM transport, as SwanStation does, before trying cd(4).
-static DeviceHandle OpenCDUnit(const std::string &path, unsigned unit, int xpt, bool reportMissing) {
+static DeviceHandle OpenCDUnit(const std::string &path, unsigned unit, int xpt) {
     union ccb request{};
     request.ccb_h.func_code = XPT_GDEVLIST;
     std::memcpy(request.cgdl.periph_name, "cd", sizeof("cd"));
@@ -331,7 +258,6 @@ static DeviceHandle OpenCDUnit(const std::string &path, unsigned unit, int xpt, 
         std::strncmp(request.cgdl.periph_name, "pass", sizeof(request.cgdl.periph_name)) == 0) {
         const auto passPath = std::string(kPassPrefix) + std::to_string(request.cgdl.unit_number);
         if (auto *device = OpenPass(passPath)) {
-            Log("%s mapped to %s via /dev/xpt0", path.c_str(), passPath.c_str());
             return device;
         }
     }
@@ -342,18 +268,12 @@ static DeviceHandle OpenCDUnit(const std::string &path, unsigned unit, int xpt, 
         if (ioctl(cd, CAMGETPASSTHRU, &mapping) == 0 && mapping.cgdl.status != CAM_GDEVLIST_ERROR &&
             std::strncmp(mapping.cgdl.periph_name, "pass", sizeof(mapping.cgdl.periph_name)) == 0) {
             const auto passPath = std::string(kPassPrefix) + std::to_string(mapping.cgdl.unit_number);
-            if (auto *device = OpenPass(passPath, true, &mapping.ccb_h)) {
+            if (auto *device = OpenPass(passPath, &mapping.ccb_h)) {
                 device->cdFd = cd;
-                Log("%s mapped to %s", path.c_str(), passPath.c_str());
                 return device;
             }
         }
         close(cd);
-    } else {
-        const int error = errno;
-        if (reportMissing || error != ENOENT) {
-            Log("open %s: %s", path.c_str(), std::strerror(error));
-        }
     }
     return kInvalidDeviceHandle;
 }
@@ -373,7 +293,7 @@ static DeviceHandle OpenCAMDrive(const std::string &path) {
         return OpenPass(path);
     }
     const int xpt = open("/dev/xpt0", O_RDWR);
-    auto *device = OpenCDUnit(path, unit, xpt, true);
+    auto *device = OpenCDUnit(path, unit, xpt);
     if (xpt >= 0) {
         close(xpt);
     }
@@ -432,12 +352,9 @@ DriveState PollDriveState(DeviceHandle handle) {
 static std::vector<HostDriveInfo> EnumerateCAMDrives() {
     std::vector<HostDriveInfo> drives;
     const int xpt = open("/dev/xpt0", O_RDWR);
-    if (xpt < 0) {
-        Log("open /dev/xpt0: %s", std::strerror(errno));
-    }
     for (unsigned unit = 0; unit < 32; ++unit) {
         std::string path = std::string(kDrivePrefix) + std::to_string(unit);
-        if (std::unique_ptr<CAMDevice> device{OpenCDUnit(path, unit, xpt, unit < 2)}) {
+        if (std::unique_ptr<CAMDevice> device{OpenCDUnit(path, unit, xpt)}) {
             drives.push_back({std::move(path), device->passPath, PollDriveState(device.get())});
         }
     }
@@ -450,7 +367,7 @@ static std::vector<HostDriveInfo> EnumerateCAMDrives() {
         if (std::ranges::find(drives, path, &HostDriveInfo::altPath) != drives.end()) {
             continue;
         }
-        if (std::unique_ptr<CAMDevice> device{OpenPass(path, unit == 0)}) {
+        if (std::unique_ptr<CAMDevice> device{OpenPass(path)}) {
             drives.push_back({std::move(path), {}, PollDriveState(device.get())});
         }
     }
@@ -460,7 +377,6 @@ static std::vector<HostDriveInfo> EnumerateCAMDrives() {
 namespace ps5disc {
 
 DeviceHandle OpenServiceDrive(const std::string &path) {
-    g_logCount.store(0, std::memory_order_relaxed);
     if (!path.empty()) {
         return OpenCAMDrive(path);
     }
@@ -479,11 +395,9 @@ DeviceHandle OpenServiceDrive(const std::string &path) {
                            (inquiry.ccb_h.status & CAM_STATUS_MASK) == CAM_REQ_CMP &&
                            inquiry.cpi.transport == XPORT_USB;
         if (isUSB || (drives.size() == 1 && drive.driveState == DriveState::MediaPresent)) {
-            Log("Selected %s for the optical service", drive.path.c_str());
             return device.release();
         }
     }
-    Log("No USB optical drive identified. Connect the reader with a disc or specify its CAM path.");
     return kInvalidDeviceHandle;
 }
 
@@ -497,11 +411,7 @@ bool ExecuteRead(DeviceHandle handle, std::span<const uint8> cdb, std::span<uint
 } // namespace ps5disc
 
 std::vector<HostDriveInfo> EnumerateHostCDDrives() {
-    g_logCount.store(0, std::memory_order_relaxed);
     auto drives = EnumerateCAMDrives();
-    if (drives.empty()) {
-        Log("No accessible optical CAM device");
-    }
     // Keep the service as a last-resort entry even when a CAM unit exists. The
     // title's sandbox can make the unit visible but still deny opening it, while
     // the service runs with the permissions of the process that loaded it.
