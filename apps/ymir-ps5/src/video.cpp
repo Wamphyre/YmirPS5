@@ -422,12 +422,29 @@ bool Video::PresentCPU(std::span<const uint32_t> pixels, unsigned width, unsigne
         sourceRow[y] = size_t(y * height / rect.h) * width;
     }
 
+    constexpr uint32_t black = 0xff000000;
+    const unsigned right = rect.x + rect.w;
+    const unsigned bottom = rect.y + rect.h;
     for (unsigned y = 0; y < output.h; y += kTileSize) {
         for (unsigned x = 0; x < output.w; x += kTileSize) {
+            // Keep destination stores contiguous for write combining. Only
+            // tiles crossing the picture edge need a per-pixel bounds check.
+            if (x + kTileSize <= rect.x || y + kTileSize <= rect.y || x >= right || y >= bottom) {
+                destination = std::fill_n(destination, m_swizzle.size(), black);
+                continue;
+            }
+            if (x >= rect.x && y >= rect.y && x + kTileSize <= right && y + kTileSize <= bottom) {
+                const auto *columns = sourceX.data() + (x - rect.x);
+                const auto *rows = sourceRow.data() + (y - rect.y);
+                for (const unsigned pixel : m_swizzle) {
+                    *destination++ = black | pixels[rows[pixel / kTileSize] + columns[pixel % kTileSize]];
+                }
+                continue;
+            }
             for (const unsigned pixel : m_swizzle) {
                 const unsigned screenX = x + pixel % kTileSize - rect.x;
                 const unsigned screenY = y + pixel / kTileSize - rect.y;
-                uint32_t color = 0xff000000;
+                uint32_t color = black;
                 if (screenX < rect.w && screenY < rect.h) {
                     color |= pixels[sourceRow[screenY] + sourceX[screenX]];
                 }

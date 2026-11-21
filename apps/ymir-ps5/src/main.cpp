@@ -129,8 +129,10 @@ Button MapButtons(uint32_t buttons) {
 using Clock = std::chrono::steady_clock;
 using namespace std::chrono_literals;
 
-enum class Page { Home, Images, Video, Audio, Saves, Slots, Slot, Memory, Confirm, Controls };
+enum class Page { Home, Game, Images, Video, Audio, Saves, Slots, Slot, Memory, Confirm, Controls };
 enum class HomeOption { BootUSB, Library, BootBIOS, Video, Audio, Saves, Exit };
+enum class GameOption { Resume, Close, Restart, Save, Load, Exit, Video, Audio, Saves };
+enum class StateAction { Manage, Save, Load };
 
 constexpr std::array kResolutionLabels{"1080p", "1440p", "4K (2160p)", "Native"};
 constexpr std::array kAspectLabels{"4:3", "16:9", "16:10", "Square pixels"};
@@ -154,6 +156,7 @@ private:
     void BootBIOS();
     bool Boot(std::string_view source);
     void FinishBoot(std::string game);
+    void CloseGame();
     void Resume();
     void OpenMenu();
     void PollMedia();
@@ -169,6 +172,8 @@ private:
     void UpdateCovers();
     void ChangeVideo(int direction);
     void ChangeAudio(int direction);
+    void SaveState();
+    void LoadState();
     void Ask(std::string question, std::function<std::string()> action);
     void Status(std::string text);
 
@@ -203,6 +208,7 @@ private:
     size_t m_controlsReturnSelection = 0;
     size_t m_selected = 0;
     unsigned m_slot = 1;
+    StateAction m_stateAction = StateAction::Manage;
     std::string m_title;
     std::string m_detail;
     std::string m_status;
@@ -288,6 +294,15 @@ void Frontend::FinishBoot(std::string game) {
     Resume();
 }
 
+void Frontend::CloseGame() {
+    m_saturn->EjectDisc();
+    m_video.ClearGameFrame();
+    m_driveState = DriveState::Unknown;
+    m_game.clear();
+    m_started = false;
+    OpenMenu();
+}
+
 void Frontend::Resume() {
     m_audio.Clear();
     m_menuOpen = false;
@@ -299,7 +314,7 @@ void Frontend::OpenMenu() {
     m_audio.Clear();
     m_saturnButtons = 0;
     m_menuOpen = true;
-    SetPage(Page::Home);
+    SetPage(m_started ? Page::Game : Page::Home);
 }
 
 void Frontend::PollMedia() {
@@ -351,19 +366,32 @@ void Frontend::BuildRows() {
 
     switch (m_page) {
     case Page::Home:
-        m_title = m_started ? "Paused" : "Home";
-        m_detail = m_started ? m_game : "Choose a disc or start the Saturn BIOS.";
-        if (m_started) {
-            m_rows.push_back({"Resume", "", true, MenuIcon::Play});
-        }
-        m_rows.insert(m_rows.end(), {{"Boot USB disc", "Optical drive", true, MenuIcon::Disc},
-                                     {"Game library", "CHD, CUE, CCD, MDS, ISO", true, MenuIcon::Folder},
-                                     {"Boot Saturn BIOS", "Without a disc", true, MenuIcon::Play},
-                                     {"Video settings", VideoProfile(m_settings), true, MenuIcon::Video},
-                                     {"Audio settings", "", true, MenuIcon::Audio},
-                                     {"Saved games", "", true, MenuIcon::Save},
-                                     {"Exit YmirPS5", "", true, MenuIcon::Exit}});
+        m_title = "Home";
+        m_detail = "Choose a disc or start the Saturn BIOS.";
+        m_rows = {{"Boot USB disc", "Optical drive", true, MenuIcon::Disc},
+                  {"Game library", "CHD, CUE, CCD, MDS, ISO", true, MenuIcon::Folder},
+                  {"Boot Saturn BIOS", "Without a disc", true, MenuIcon::Play},
+                  {"Video settings", VideoProfile(m_settings), true, MenuIcon::Video},
+                  {"Audio settings", "", true, MenuIcon::Audio},
+                  {"Saved games", "", true, MenuIcon::Save},
+                  {"Exit YmirPS5", "", true, MenuIcon::Exit}};
         break;
+    case Page::Game: {
+        const bool hasStates = !m_storage.StatePath(*m_saturn, 1).empty();
+        const char *stateDetail = hasStates ? "" : "Requires an identified disc";
+        m_title = "Game menu";
+        m_detail = m_game;
+        m_rows = {{"Resume", "", true, MenuIcon::Play},
+                  {"Close game", "Return to Home", true, MenuIcon::Folder},
+                  {"Restart game", "", true, MenuIcon::Play},
+                  {"Save state", stateDetail, hasStates, MenuIcon::Save},
+                  {"Load state", stateDetail, hasStates, MenuIcon::Save},
+                  {"Exit YmirPS5", "Return to the PS5 home screen", true, MenuIcon::Exit},
+                  {"Video settings", VideoProfile(m_settings), true, MenuIcon::Video},
+                  {"Audio settings", "", true, MenuIcon::Audio},
+                  {"Saved games", "", true, MenuIcon::Save}};
+        break;
+    }
     case Page::Images:
         m_title = "Game library";
         m_detail = m_directory.empty() ? "Choose a storage location." : m_directory.string();
@@ -403,12 +431,17 @@ void Frontend::BuildRows() {
         break;
     }
     case Page::Slots:
-        m_title = "Save states";
+        switch (m_stateAction) {
+        case StateAction::Manage: m_title = "Save states"; break;
+        case StateAction::Save: m_title = "Save state"; break;
+        case StateAction::Load: m_title = "Load state"; break;
+        }
         m_detail = m_game;
         for (unsigned slot = 1; slot <= 5; ++slot) {
             std::error_code error;
             const bool occupied = fs::is_regular_file(m_storage.StatePath(*m_saturn, slot), error);
-            m_rows.push_back({"Slot " + std::to_string(slot), occupied ? "Saved" : "Empty"});
+            m_rows.push_back({"Slot " + std::to_string(slot), occupied ? "Saved" : "Empty",
+                              m_stateAction != StateAction::Load || occupied});
         }
         break;
     case Page::Slot: {
@@ -556,6 +589,37 @@ void Frontend::ChangeAudio(int direction) {
     Status(saved ? "" : "Settings applied for this session. Could not save them to storage.");
 }
 
+void Frontend::SaveState() {
+    const auto path = m_storage.StatePath(*m_saturn, m_slot);
+    if (path.empty()) {
+        Status("The current disc is unavailable.");
+        return;
+    }
+
+    const auto save = [this]() -> std::string {
+        return m_storage.SaveState(*m_saturn, m_slot) ? "State saved." : "Could not save the state.";
+    };
+    std::error_code error;
+    if (fs::is_regular_file(path, error)) {
+        Ask("Overwrite this save state?", save);
+    } else {
+        const auto message = save();
+        BuildRows();
+        Status(message);
+    }
+}
+
+void Frontend::LoadState() {
+    Ask("Load this save state?", [this] {
+        if (!m_storage.LoadState(*m_saturn, m_slot)) {
+            return std::string("This state could not be read or is incompatible with the current disc or BIOS.");
+        }
+        m_video.ClearGameFrame();
+        Resume();
+        return std::string("State loaded.");
+    });
+}
+
 void Frontend::Ask(std::string question, std::function<std::string()> action) {
     m_returnPage = m_page;
     m_confirm = std::move(action);
@@ -573,24 +637,10 @@ void Frontend::Activate(int delta) {
 
     switch (m_page) {
     case Page::Home: {
-        if (m_started && m_selected == 0) {
-            Resume();
-            return;
-        }
-        const auto option = static_cast<HomeOption>(m_selected - (m_started ? 1 : 0));
-        switch (option) {
+        switch (static_cast<HomeOption>(m_selected)) {
         case HomeOption::BootUSB: Boot({}); break;
         case HomeOption::Library: OpenLibrary(); break;
-        case HomeOption::BootBIOS:
-            if (m_started) {
-                Ask("Start the BIOS and end the current session?", [this] {
-                    BootBIOS();
-                    return std::string{};
-                });
-            } else {
-                BootBIOS();
-            }
-            break;
+        case HomeOption::BootBIOS: BootBIOS(); break;
         case HomeOption::Video: SetPage(Page::Video); break;
         case HomeOption::Audio: SetPage(Page::Audio); break;
         case HomeOption::Saves: SetPage(Page::Saves); break;
@@ -598,6 +648,37 @@ void Frontend::Activate(int delta) {
         }
         break;
     }
+    case Page::Game:
+        switch (static_cast<GameOption>(m_selected)) {
+        case GameOption::Resume: Resume(); break;
+        case GameOption::Close:
+            Ask("Close the game and return to Home?", [this] {
+                CloseGame();
+                return std::string{};
+            });
+            break;
+        case GameOption::Restart:
+            Ask("Restart the current game?", [this] {
+                FinishBoot(m_game);
+                return std::string{};
+            });
+            break;
+        case GameOption::Save:
+        case GameOption::Load:
+            m_stateAction = static_cast<GameOption>(m_selected) == GameOption::Save ? StateAction::Save : StateAction::Load;
+            SetPage(Page::Slots);
+            break;
+        case GameOption::Exit:
+            Ask("Exit YmirPS5?", [this] {
+                m_running = false;
+                return std::string{};
+            });
+            break;
+        case GameOption::Video: SetPage(Page::Video); break;
+        case GameOption::Audio: SetPage(Page::Audio); break;
+        case GameOption::Saves: SetPage(Page::Saves); break;
+        }
+        break;
     case Page::Images:
         if (m_images[m_selected].folder) {
             const auto path = m_images[m_selected].path;
@@ -610,6 +691,7 @@ void Frontend::Activate(int delta) {
     case Page::Audio: ChangeAudio(delta); break;
     case Page::Saves:
         if (m_selected == 0) {
+            m_stateAction = StateAction::Manage;
             SetPage(Page::Slots);
         } else if (EnsureBIOS()) {
             SetPage(Page::Memory);
@@ -617,45 +699,25 @@ void Frontend::Activate(int delta) {
         break;
     case Page::Slots:
         m_slot = unsigned(m_selected) + 1;
-        SetPage(Page::Slot);
-        break;
-    case Page::Slot: {
-        constexpr const char *failed = "Could not save the state.";
-        std::error_code error;
-        const auto path = m_storage.StatePath(*m_saturn, m_slot);
-        if (path.empty()) {
-            Status("The current disc is unavailable.");
-            break;
+        switch (m_stateAction) {
+        case StateAction::Manage: SetPage(Page::Slot); break;
+        case StateAction::Save: SaveState(); break;
+        case StateAction::Load: LoadState(); break;
         }
-        const bool occupied = fs::is_regular_file(path, error);
-        const auto save = [this]() -> std::string {
-            return m_storage.SaveState(*m_saturn, m_slot) ? "State saved." : failed;
-        };
+        break;
+    case Page::Slot:
         if (m_selected == 0) {
-            if (occupied) {
-                Ask("Overwrite this save state?", save);
-            } else {
-                const auto message = save();
-                BuildRows();
-                Status(message);
-            }
+            SaveState();
         } else if (m_selected == 1) {
-            Ask("Load this save state?", [this] {
-                if (!m_storage.LoadState(*m_saturn, m_slot)) {
-                    return std::string("This state could not be read or is incompatible with the current disc or BIOS.");
-                }
-                m_video.ClearGameFrame();
-                Resume();
-                return std::string("State loaded.");
-            });
+            LoadState();
         } else {
+            const auto path = m_storage.StatePath(*m_saturn, m_slot);
             Ask("Delete this save state?", [path] {
                 std::error_code removalError;
                 return fs::remove(path, removalError) ? "State deleted." : "Could not delete the state.";
             });
         }
         break;
-    }
     case Page::Memory:
         if (m_selected == 0) {
             const auto path = m_storage.MemoryTransferPath();
@@ -685,10 +747,18 @@ void Frontend::Activate(int delta) {
         }
         break;
     case Page::Confirm: {
-        const auto message = m_selected == 1 ? m_confirm() : std::string{};
+        // Return before running the action so it can change pages or resume gameplay.
+        const bool accepted = m_selected == 1;
+        auto action = std::move(m_confirm);
         m_confirm = {};
         SetPage(m_returnPage);
-        Status(message);
+        if (accepted && action) {
+            auto message = action();
+            if (m_menuOpen && m_running) {
+                BuildRows();
+                Status(std::move(message));
+            }
+        }
         break;
     }
     case Page::Controls: break;
@@ -697,11 +767,8 @@ void Frontend::Activate(int delta) {
 
 void Frontend::Back() {
     switch (m_page) {
-    case Page::Home:
-        if (m_started) {
-            Resume();
-        }
-        break;
+    case Page::Home: break;
+    case Page::Game: Resume(); break;
     case Page::Images:
         if (m_directory.empty()) {
             SetPage(Page::Home);
@@ -710,7 +777,7 @@ void Frontend::Back() {
         }
         break;
     case Page::Slot: SetPage(Page::Slots); break;
-    case Page::Slots:
+    case Page::Slots: SetPage(m_stateAction == StateAction::Manage ? Page::Saves : Page::Game); break;
     case Page::Memory: SetPage(Page::Saves); break;
     case Page::Confirm:
         m_confirm = {};
@@ -720,13 +787,13 @@ void Frontend::Back() {
         SetPage(m_controlsReturnPage);
         m_selected = std::min(m_controlsReturnSelection, m_rows.empty() ? size_t{0} : m_rows.size() - 1);
         break;
-    default: SetPage(Page::Home); break;
+    default: SetPage(m_started ? Page::Game : Page::Home); break;
     }
 }
 
 void Frontend::Input(uint32_t held, uint32_t pressed) {
     if (pressed & (ps5::Circle | ps5::Touchpad)) {
-        if (m_page != Page::Home || m_started) {
+        if (m_page != Page::Home) {
             m_audio.PlayMenuSound(ps5::MenuSound::Back);
         }
         Back();
@@ -834,7 +901,7 @@ int Frontend::Run(std::ofstream &launchLog) {
                                       }});
     OpenMenu();
     Status(m_storage.SetupError());
-    ps5::Report("Running. Touchpad opens the menu; L3+R3 exits");
+    ps5::Report("Running. L3+R3 or Touchpad opens the game menu");
     launchLog << "Menu initialized" << std::endl;
 
     uint32_t previousButtons = 0;
@@ -843,23 +910,25 @@ int Frontend::Run(std::ofstream &launchLog) {
     while (m_running) {
         const uint32_t buttons = m_pad.Read();
         const uint32_t pressed = buttons & ~previousButtons;
+        constexpr uint32_t gameMenuButtons = ps5::L3 | ps5::R3;
+        const bool gameMenuPressed = (buttons & gameMenuButtons) == gameMenuButtons &&
+                                     (previousButtons & gameMenuButtons) != gameMenuButtons;
         previousButtons = buttons;
-        constexpr uint32_t exitButtons = ps5::L3 | ps5::R3;
-        if ((buttons & exitButtons) == exitButtons) {
-            break;
-        }
 
         if (m_menuOpen && !m_usbMount.valid()) {
             const auto previousState = m_driveState;
             PollMedia();
-            if (previousState != m_driveState &&
-                (m_page == Page::Saves || m_page == Page::Slots || m_page == Page::Slot ||
-                 (m_page == Page::Confirm && m_returnPage == Page::Slot))) {
-                m_confirm = {};
-                SetPage(Page::Saves);
+            if (previousState != m_driveState) {
+                const Page activePage = m_page == Page::Confirm ? m_returnPage : m_page;
+                if (activePage == Page::Slots || activePage == Page::Slot) {
+                    m_confirm = {};
+                    SetPage(m_stateAction == StateAction::Manage ? Page::Saves : Page::Game);
+                } else if (m_page == Page::Game || m_page == Page::Saves) {
+                    BuildRows();
+                }
             }
             Input(buttons, pressed);
-        } else if (!m_menuOpen && (pressed & ps5::Touchpad)) {
+        } else if (!m_menuOpen && (gameMenuPressed || (pressed & ps5::Touchpad))) {
             OpenMenu();
             m_audio.PlayMenuSound(ps5::MenuSound::Back);
         }
@@ -914,8 +983,8 @@ int Frontend::Run(std::ofstream &launchLog) {
                     hints.push_back(
                         {MenuIcon::Cross, m_page == Page::Video || m_page == Page::Audio ? "Change" : "Select"});
                 }
-                if (m_page != Page::Home || m_started) {
-                    hints.push_back({MenuIcon::Circle, m_page == Page::Home ? "Resume" : "Back"});
+                if (m_page != Page::Home) {
+                    hints.push_back({MenuIcon::Circle, m_page == Page::Game ? "Resume" : "Back"});
                 }
                 if (m_page == Page::Home) {
                     hints.push_back({MenuIcon::Square, "Game library"});
@@ -924,8 +993,7 @@ int Frontend::Run(std::ofstream &launchLog) {
                     hints.push_back({MenuIcon::Triangle, "Controls"});
                 }
                 if (m_page == Page::Controls) {
-                    hints.push_back({MenuIcon::None, "Touchpad  Pause"});
-                    hints.push_back({MenuIcon::None, "L3 + R3  Exit"});
+                    hints.push_back({MenuIcon::None, "L3 + R3 / Touchpad  Game menu"});
                 } else {
                     hints.push_back({MenuIcon::DPad, "Navigate"});
                     const size_t visible = m_page == Page::Images ? ps5::kLibraryPageSize : ps5::kMenuVisibleRows;

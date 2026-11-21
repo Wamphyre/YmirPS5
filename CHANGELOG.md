@@ -15,6 +15,8 @@ Released 2026-11-20.
     - Reduced optical drive polling during playback.
     - Added drive speed, read throughput, and sector addresses for failed or short reads to `/data/YmirPS5/usb.log`.
 - Reduced menu CPU/GPU work: the 1920x1080 menu is uploaded only when it changes, with a slow heartbeat for device events.
+- Added an in-game menu on L3 + R3 and Touchpad with options to resume, close, restart, save, load, and exit.
+- Reduced VideoOut fallback scaling work by handling full picture tiles and black borders in bulk.
 - PS5 distribution builds now target the console's Zen 2 CPU with `-march=znver2 -mtune=znver2`, LTO/IPO, and aggressive inlining.
 
 ## YmirPS5 0.7.1

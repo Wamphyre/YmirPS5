@@ -63,8 +63,10 @@ python3 apps/ymir-ps5/tools/update_ps5.py --index-games 192.0.2.1
 | L1 / R1 | Change pages | Z / C |
 | L2 / R2 | | L / R |
 | Options | | Start |
-| Touchpad | Go back | Open the pause menu |
-| L3 + R3 | Exit YmirPS5 | Exit YmirPS5 |
+| Touchpad | Go back or resume | Open the game menu |
+| L3 + R3 | | Open the game menu |
+
+The game menu offers **Resume**, **Close game**, **Restart game**, **Save state**, **Load state**, and **Exit YmirPS5**. Close game returns to the emulator's Home screen. Save and load use the same five slots per disc as **Saved games**.
 
 ## USB optical drive
 
