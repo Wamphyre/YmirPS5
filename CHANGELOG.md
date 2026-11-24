@@ -1,5 +1,10 @@
 # Ymir changelog
 
+## YmirPS5 0.7.3
+
+- Added automatic and manual selection of 1 MiB and 4 MiB Saturn RAM cartridges for disc images and USB CDs.
+- Added an offline catalog of cheats that can be toggled from the touchpad pause menu for supported disc revisions.
+
 ## YmirPS5 0.7.2
 
 Released 2026-11-20.

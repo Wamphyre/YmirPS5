@@ -1,6 +1,6 @@
 # Compilar YmirPS5
 
-La compilación de PS5 genera un único paquete instalable, `YmirPS5-0.7.2-PPSA98567.zip`. Vulkan forma parte del paquete. VideoOut proporciona una ruta de recuperación en tiempo de ejecución.
+La compilación de PS5 genera un único paquete instalable, `YmirPS5-0.7.3-PPSA98567.zip`. Vulkan forma parte del paquete. VideoOut proporciona una ruta de recuperación en tiempo de ejecución.
 
 ## Dependencias
 
@@ -31,7 +31,7 @@ La configuración descarga los encabezados de cereal 1.3.2. Para una compilació
 
 La build PS5 compila para la CPU Zen 2 de la consola con `-march=znver2 -mtune=znver2` y activa LTO/IPO e inlining agresivo. Es la configuración usada para el paquete de distribución.
 
-El ZIP aparece en `build/ps5/` y contiene la carpeta `PPSA98567`, con `eboot.bin`, `sce_module/libc.prx`, los recursos del dashboard en `sce_sys/` y los avisos de licencia. El icono del título se incrusta también en el menú. Si se compila con soporte de discos físicos, incluye el helper Lapy `lapy.elf` con su manifiesto, el ejecutable nativo `tools/ymir-ps5-disc.self` y la licencia MIT de Lapy.
+El ZIP aparece en `build/ps5/` y contiene la carpeta `PPSA98567`, con `eboot.bin`, `sce_module/libc.prx`, los recursos del dashboard en `sce_sys/` y los avisos de licencia. El catálogo de trucos se incrusta en `eboot.bin`. Si se compila con soporte de discos físicos, incluye el helper Lapy `lapy.elf` con su manifiesto, el ejecutable nativo `tools/ymir-ps5-disc.self` y la licencia MIT de Lapy.
 
 El fondo original está en `apps/ymir-ps5/assets/dashboard.png`. La compilación copia su versión BC7 3840 × 2160 como `sce_sys/pic0.dds` para la selección y `sce_sys/pic1.dds` para el inicio. Incluye también `sce_sys/snd0.at9`, la versión en bucle ATRAC9 de *Cold Orbit*. La partitura y el sintetizador del tema están en `apps/ymir-ps5/tools/dashboard_music.py`.
 

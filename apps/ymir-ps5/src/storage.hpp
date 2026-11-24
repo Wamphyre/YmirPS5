@@ -16,6 +16,7 @@ namespace ps5 {
 
 enum class Aspect { FourThree, SixteenNine, SixteenTen, Source, Count };
 enum class Resolution { HD, QHD, UHD, Native, Count };
+enum class CartridgeMode { Automatic, None, RAM1MiB, RAM4MiB, Count };
 
 struct VideoSettings {
     Resolution resolution = Resolution::Native;
@@ -53,6 +54,8 @@ public:
     bool WriteVideoSettings(const VideoSettings &settings) const;
     AudioSettings ReadAudioSettings() const;
     bool WriteAudioSettings(const AudioSettings &settings) const;
+    CartridgeMode ReadCartridgeMode() const;
+    bool WriteCartridgeMode(CartridgeMode mode) const;
     bool ReadSystemSettings(ymir::smpc::PersistentSMPCData &settings) const;
     bool WriteSystemSettings(const ymir::smpc::PersistentSMPCData &settings) const;
 

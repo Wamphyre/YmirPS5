@@ -1,0 +1,21 @@
+YmirPS5 Saturn cheat catalog
+
+Adapted from libretro-database, by the Libretro database contributors.
+https://github.com/libretro/libretro-database/tree/698a0813f01a23381b715c03b79d25d90573f083/cht/Sega%20-%20Saturn
+The adapted catalog is distributed under CC BY-SA 4.0.
+https://creativecommons.org/licenses/by-sa/4.0/
+
+Game names were matched against the 2026-11-23 Sega Saturn DAT from Redump.
+Disc identifiers are taken from the Saturn headers recorded by Redump.
+https://redump.info/datfile/ss/serial,version
+
+The catalog keeps unencrypted GameShark and Action Replay work RAM writes,
+including groups of writes and an equality condition followed by one write.
+Unmatched discs, hardware setup codes, placeholders, unsupported formats and
+duplicates were removed.
+
+Each tab-separated row after the header contains the Saturn product number,
+version, release date, CD identifier, region bitmask in hexadecimal, cheat
+name, and space-separated operations. Each operation consists of eight
+hexadecimal digits for the code type and address, followed by four for the
+value. An entry with a condition starts with a D code.

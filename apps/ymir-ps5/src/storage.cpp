@@ -269,6 +269,24 @@ bool Storage::WriteAudioSettings(const AudioSettings &settings) const {
     });
 }
 
+CartridgeMode Storage::ReadCartridgeMode() const {
+    if (!m_root.empty()) {
+        std::ifstream in(m_root / "cartridge.cfg");
+        std::string magic;
+        unsigned mode = 0;
+        if (in >> magic >> mode && magic == "YMIRPS5_CART_1" && mode < unsigned(CartridgeMode::Count)) {
+            return CartridgeMode(mode);
+        }
+    }
+    return CartridgeMode::Automatic;
+}
+
+bool Storage::WriteCartridgeMode(CartridgeMode mode) const {
+    return !m_root.empty() && WriteAtomically(m_root / "cartridge.cfg", [&](std::ostream &out) {
+        out << "YMIRPS5_CART_1\n" << unsigned(mode) << '\n';
+    });
+}
+
 bool Storage::ReadSystemSettings(ymir::smpc::PersistentSMPCData &settings) const {
     if (m_root.empty()) {
         return false;
@@ -334,7 +352,15 @@ bool Storage::LoadState(ymir::Saturn &saturn, unsigned slot) const {
         std::ifstream in(path, std::ios::binary);
         cereal::PortableBinaryInputArchive archive{in};
         archive(*state);
-        return saturn.LoadState(*state);
+        if (!saturn.LoadState(*state)) {
+            return false;
+        }
+        // Older PS5 save states represent a Saturn with an empty cartridge slot.
+        if (state->scu.cartType == ymir::savestate::SCUSaveState::CartType::None &&
+            saturn.GetCartridge().GetType() != ymir::cart::CartType::None) {
+            saturn.RemoveCartridge();
+        }
+        return true;
     } catch (const std::exception &) {
         return false;
     }

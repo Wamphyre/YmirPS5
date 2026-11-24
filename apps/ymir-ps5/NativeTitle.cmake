@@ -50,12 +50,15 @@ set(_title "${CMAKE_BINARY_DIR}/title/PPSA98567")
 set(_title_files "${_title}/eboot.bin" "${_title}/sce_module/libc.prx" "${_title}/sce_sys/param.json"
                  "${_title}/sce_sys/icon0.png" "${_title}/sce_sys/pic0.dds" "${_title}/sce_sys/pic1.dds"
                  "${_title}/sce_sys/snd0.at9" "${_title}/LICENSE" "${_title}/licenses/SplineSans.txt"
-                 "${_title}/licenses/cereal.txt")
+                 "${_title}/licenses/cereal.txt" "${_title}/licenses/Cheats-CC-BY-SA-4.0.txt"
+                 "${_title}/licenses/Cheats-SOURCE.txt")
 set(_param "${CMAKE_CURRENT_SOURCE_DIR}/param.json")
 set(_dashboard_background "${CMAKE_CURRENT_SOURCE_DIR}/assets/dashboard.dds")
 set(_dashboard_music "${CMAKE_CURRENT_SOURCE_DIR}/assets/snd0.at9")
 set(_font_license "${_desktop_dir}/res/licenses/Spline_Sans/OFL.txt")
 set(_cereal_license "${ymir_ps5_cereal_SOURCE_DIR}/LICENSE")
+set(_cheat_license "${CMAKE_CURRENT_SOURCE_DIR}/assets/cheats-license.txt")
+set(_cheat_source "${CMAKE_CURRENT_SOURCE_DIR}/assets/cheats-source.txt")
 file(GLOB _sdk_stubs CONFIGURE_DEPENDS "${CMAKE_SYSROOT}/lib/*.so")
 include(Radv.cmake)
 add_custom_command(OUTPUT ${_title_files} ${_gpu_notice_files}
@@ -75,12 +78,14 @@ add_custom_command(OUTPUT ${_title_files} ${_gpu_notice_files}
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${PROJECT_SOURCE_DIR}/LICENSE" "${_title}/LICENSE"
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${_font_license}" "${_title}/licenses/SplineSans.txt"
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${_cereal_license}" "${_title}/licenses/cereal.txt"
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${_cheat_license}" "${_title}/licenses/Cheats-CC-BY-SA-4.0.txt"
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${_cheat_source}" "${_title}/licenses/Cheats-SOURCE.txt"
     ${_gpu_notice_commands}
     DEPENDS ymir-ps5-pie "${_converter}" "${_libc_builder}" "${_param}" "${_title_icon}" "${_runtime}"
             "${_native}/runtime/api-surface.txt" "${_native}/runtime/imports.txt"
             "${CMAKE_CURRENT_SOURCE_DIR}/VerifyRuntime.cmake" "${PROJECT_SOURCE_DIR}/LICENSE"
             "${_dashboard_background}" "${_dashboard_music}"
-            "${_font_license}" "${_cereal_license}" ${_gpu_notice_sources} ${_sdk_stubs}
+            "${_font_license}" "${_cereal_license}" "${_cheat_license}" "${_cheat_source}" ${_gpu_notice_sources} ${_sdk_stubs}
     VERBATIM
 )
 set(Ymir_PS5_COVERS_DIR "" CACHE PATH "Offline cover catalog produced by apps/ymir-ps5/tools/pack_covers.py")

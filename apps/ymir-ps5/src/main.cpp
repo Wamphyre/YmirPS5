@@ -2,6 +2,7 @@
 
 #include "platform.hpp"
 
+#include "cheats.hpp"
 #include "covers.hpp"
 #include "menu.hpp"
 #include "unlock.hpp"
@@ -9,6 +10,8 @@
 #include "disc_launcher.hpp"
 #endif
 
+#include <ymir/db/game_db.hpp>
+#include <ymir/hw/cart/cart_impl_dram.hpp>
 #include <ymir/media/host_cd.hpp>
 #include <ymir/media/loader/loader.hpp>
 #include <ymir/sys/clocks.hpp>
@@ -22,6 +25,7 @@
 #include <functional>
 #include <future>
 #include <memory>
+#include <optional>
 #include <string_view>
 
 extern "C" int sceSystemServiceHideSplashScreen();
@@ -105,13 +109,51 @@ Button MapButtons(uint32_t buttons) {
 using Clock = std::chrono::steady_clock;
 using namespace std::chrono_literals;
 
-enum class Page { Home, Game, Images, Video, Audio, Saves, Slots, Slot, Memory, Confirm, Controls };
-enum class HomeOption { BootUSB, Library, BootBIOS, Video, Audio, Saves, Exit };
-enum class GameOption { Resume, Close, Restart, Save, Load, Exit, Video, Audio, Saves };
+enum class Page { Home, Game, Images, Cartridge, Cheats, Video, Audio, Saves, Slots, Slot, Memory, Confirm, Controls };
+enum class HomeOption { BootUSB, Library, BootBIOS, Cartridge, Video, Audio, Saves, Exit };
+enum class GameOption { Resume, Close, Restart, Cheats, Cartridge, Save, Load, Exit, Video, Audio, Saves };
 enum class StateAction { Manage, Save, Load };
 
 constexpr std::array kResolutionLabels{"1080p", "1440p", "4K (2160p)", "Native"};
 constexpr std::array kAspectLabels{"4:3", "16:9", "16:10", "Square pixels"};
+constexpr std::array kCartridgeLabels{"Automatic", "No cartridge", "1 MiB RAM", "4 MiB RAM"};
+static_assert(kCartridgeLabels.size() == size_t(ps5::CartridgeMode::Count));
+
+ymir::cart::CartType ResolveCartridge(ps5::CartridgeMode mode, const ymir::Saturn &saturn) {
+    using Mode = ps5::CartridgeMode;
+    using Cart = ymir::cart::CartType;
+    switch (mode) {
+    case Mode::RAM1MiB: return Cart::DRAM8Mbit;
+    case Mode::RAM4MiB: return Cart::DRAM32Mbit;
+    case Mode::Automatic: {
+        const auto &cd = saturn.GetCDInterface();
+        if (cd.HasDisc() && cd.GetDiscHeader().IsValid()) {
+            const auto *info = ymir::db::GetGameInfo(cd.GetDiscHeader().productNumber, saturn.GetDiscHash());
+            if (info && info->GetCartridge() == ymir::db::Cartridge::DRAM8Mbit) {
+                return Cart::DRAM8Mbit;
+            }
+            if (info && info->GetCartridge() == ymir::db::Cartridge::DRAM32Mbit) {
+                return Cart::DRAM32Mbit;
+            }
+        }
+        return Cart::None;
+    }
+    default: return Cart::None;
+    }
+}
+
+const char *CartridgeLabel(ymir::cart::CartType type) {
+    using Cart = ymir::cart::CartType;
+    switch (type) {
+    case Cart::None: return "No cartridge";
+    case Cart::DRAM8Mbit: return "1 MiB RAM";
+    case Cart::DRAM32Mbit: return "4 MiB RAM";
+    case Cart::DRAM48Mbit: return "6 MiB RAM";
+    case Cart::BackupMemory: return "Backup memory";
+    case Cart::ROM: return "ROM cartridge";
+    }
+    return "Unknown cartridge";
+}
 
 std::string VideoProfile(const ps5::VideoSettings &settings) {
     return std::string(kResolutionLabels[unsigned(settings.resolution)]) + " · " +
@@ -123,6 +165,7 @@ public:
     Frontend()
         : m_settings(m_storage.ReadVideoSettings())
         , m_audioSettings(m_storage.ReadAudioSettings())
+        , m_cartridgeMode(m_storage.ReadCartridgeMode())
         , m_saturn(std::make_unique<ymir::Saturn>()) {}
 
     int Run();
@@ -135,7 +178,9 @@ private:
     void CloseGame();
     void Resume();
     void OpenMenu();
-    void PollMedia();
+    bool PollMedia();
+    bool UpdateCheatDisc(bool reset = false);
+    void InsertBootCartridge();
     double CoreHz() const;
 
     void SetPage(Page page);
@@ -156,12 +201,15 @@ private:
     ps5::Storage m_storage;
     ps5::VideoSettings m_settings;
     ps5::AudioSettings m_audioSettings;
+    ps5::CartridgeMode m_cartridgeMode;
     ps5::MenuCanvas m_menu;
     ps5::Video m_video;
     ps5::Pad m_pad;
     ps5::Audio m_audio;
     uint32_t m_saturnButtons = 0;
     std::unique_ptr<ymir::Saturn> m_saturn;
+    ps5::Cheats m_cheats;
+    std::optional<ymir::XXH128Hash> m_cheatDisc;
     std::future<std::string> m_usbMount;
     Clock::time_point m_usbStarted{};
     bool m_usbFrameShown = false;
@@ -260,7 +308,9 @@ void Frontend::BootBIOS() {
 
 void Frontend::FinishBoot(std::string game) {
     m_game = std::move(game);
+    InsertBootCartridge();
     m_saturn->Reset(true);
+    UpdateCheatDisc(true);
     m_video.ClearGameFrame();
     m_driveState = DriveState::Unknown;
     m_started = true;
@@ -269,6 +319,8 @@ void Frontend::FinishBoot(std::string game) {
 
 void Frontend::CloseGame() {
     m_saturn->EjectDisc();
+    m_saturn->RemoveCartridge();
+    UpdateCheatDisc(true);
     m_video.ClearGameFrame();
     m_driveState = DriveState::Unknown;
     m_game.clear();
@@ -290,20 +342,50 @@ void Frontend::OpenMenu() {
     SetPage(m_started ? Page::Game : Page::Home);
 }
 
-void Frontend::PollMedia() {
-    if (!m_started) {
+void Frontend::InsertBootCartridge() {
+    using Cart = ymir::cart::CartType;
+    const auto wanted = ResolveCartridge(m_cartridgeMode, *m_saturn);
+    if (wanted == m_saturn->GetCartridge().GetType()) {
         return;
+    }
+    switch (wanted) {
+    case Cart::DRAM8Mbit: m_saturn->InsertCartridge<ymir::cart::DRAM8MbitCartridge>(); break;
+    case Cart::DRAM32Mbit: m_saturn->InsertCartridge<ymir::cart::DRAM32MbitCartridge>(); break;
+    default: m_saturn->RemoveCartridge(); break;
+    }
+}
+
+bool Frontend::UpdateCheatDisc(bool reset) {
+    const auto &cd = m_saturn->GetCDInterface();
+    const auto &header = cd.GetDiscHeader();
+    std::optional<ymir::XXH128Hash> hash;
+    if (cd.HasDisc() && header.IsValid()) {
+        hash = m_saturn->GetDiscHash();
+    }
+    if (!reset && hash == m_cheatDisc) {
+        return false;
+    }
+    m_cheatDisc = hash;
+    m_cheats.Load(hash ? &header : nullptr);
+    return true;
+}
+
+bool Frontend::PollMedia() {
+    if (!m_started) {
+        return false;
     }
     const auto &cd = m_saturn->GetCDInterface();
     const auto state = cd.PollDriveState();
-    if (state == m_driveState) {
-        return;
+    const bool discChanged = UpdateCheatDisc();
+    if (state == m_driveState && !discChanged) {
+        return false;
     }
     if (state == DriveState::MediaPresent && cd.GetDiscHeader().IsValid()) {
         m_saturn->AutodetectRegion();
         m_game = cd.GetDiscHeader().gameTitle;
     }
     m_driveState = state;
+    return true;
 }
 
 double Frontend::CoreHz() const {
@@ -334,6 +416,7 @@ void Frontend::BuildRows() {
         m_rows = {{"Boot USB disc", "Optical drive", true, MenuIcon::Disc},
                   {"Game library", "CHD, CUE, CCD, MDS, ISO", true, MenuIcon::Folder},
                   {"Boot Saturn BIOS", "Without a disc", true, MenuIcon::Play},
+                  {"RAM cartridge", kCartridgeLabels[size_t(m_cartridgeMode)]},
                   {"Video settings", VideoProfile(m_settings), true, MenuIcon::Video},
                   {"Audio settings", "", true, MenuIcon::Audio},
                   {"Saved games", "", true, MenuIcon::Save},
@@ -341,12 +424,19 @@ void Frontend::BuildRows() {
         break;
     case Page::Game: {
         const bool hasStates = !m_storage.StatePath(*m_saturn, 1).empty();
+        const auto cheatCount = m_cheats.Entries().size();
+        std::string cheatDetail = m_cheatDisc ? "No codes for this disc" : "Requires an identified disc";
+        if (cheatCount) {
+            cheatDetail = std::to_string(m_cheats.EnabledCount()) + " enabled";
+        }
         const char *stateDetail = hasStates ? "" : "Requires an identified disc";
         m_title = "Game menu";
         m_detail = m_game;
         m_rows = {{"Resume", "", true, MenuIcon::Play},
                   {"Close game", "Return to Home", true, MenuIcon::Folder},
                   {"Restart game", "", true, MenuIcon::Play},
+                  {"Cheats", cheatDetail, cheatCount != 0},
+                  {"RAM cartridge", CartridgeLabel(m_saturn->GetCartridge().GetType())},
                   {"Save state", stateDetail, hasStates, MenuIcon::Save},
                   {"Load state", stateDetail, hasStates, MenuIcon::Save},
                   {"Exit YmirPS5", "Return to the PS5 home screen", true, MenuIcon::Exit},
@@ -355,6 +445,24 @@ void Frontend::BuildRows() {
                   {"Saved games", "", true, MenuIcon::Save}};
         break;
     }
+    case Page::Cartridge:
+        m_title = "RAM cartridge";
+        m_detail = m_started ? std::string("Inserted  ") + CartridgeLabel(m_saturn->GetCartridge().GetType()) +
+                                  "  /  Changes apply on restart"
+                            : "Applied when starting the Saturn.";
+        for (const auto *label : kCartridgeLabels) {
+            const auto mode = ps5::CartridgeMode(m_rows.size());
+            const auto value = mode == m_cartridgeMode ? "Selected" : "";
+            m_rows.push_back({label, value});
+        }
+        break;
+    case Page::Cheats:
+        m_title = "Cheats";
+        m_detail = m_cheats.Entries().empty() ? "No codes for this disc" : m_game;
+        for (const auto &entry : m_cheats.Entries()) {
+            m_rows.push_back({std::string(entry.name), entry.enabled ? "On" : "Off"});
+        }
+        break;
     case Page::Images:
         m_title = "Game library";
         m_detail = m_directory.empty() ? "Choose a storage location." : m_directory.string();
@@ -603,6 +711,10 @@ void Frontend::Activate(int delta) {
         case HomeOption::BootUSB: Boot({}); break;
         case HomeOption::Library: OpenLibrary(); break;
         case HomeOption::BootBIOS: BootBIOS(); break;
+        case HomeOption::Cartridge:
+            SetPage(Page::Cartridge);
+            m_selected = size_t(m_cartridgeMode);
+            break;
         case HomeOption::Video: SetPage(Page::Video); break;
         case HomeOption::Audio: SetPage(Page::Audio); break;
         case HomeOption::Saves: SetPage(Page::Saves); break;
@@ -624,6 +736,11 @@ void Frontend::Activate(int delta) {
                 FinishBoot(m_game);
                 return std::string{};
             });
+            break;
+        case GameOption::Cheats: SetPage(Page::Cheats); break;
+        case GameOption::Cartridge:
+            SetPage(Page::Cartridge);
+            m_selected = size_t(m_cartridgeMode);
             break;
         case GameOption::Save:
         case GameOption::Load:
@@ -651,6 +768,21 @@ void Frontend::Activate(int delta) {
         break;
     case Page::Video: ChangeVideo(delta); break;
     case Page::Audio: ChangeAudio(delta); break;
+    case Page::Cartridge: {
+        m_cartridgeMode = ps5::CartridgeMode(m_selected);
+        const bool saved = m_storage.WriteCartridgeMode(m_cartridgeMode);
+        BuildRows();
+        if (!saved) {
+            Status("Could not save. Applies on boot or restart in this session.");
+        } else {
+            Status(m_started ? "Saved. Restart to apply." : "");
+        }
+        break;
+    }
+    case Page::Cheats:
+        m_cheats.Toggle(m_selected);
+        BuildRows();
+        break;
     case Page::Saves:
         if (m_selected == 0) {
             m_stateAction = StateAction::Manage;
@@ -869,13 +1001,13 @@ int Frontend::Run() {
         previousButtons = buttons;
 
         if (m_menuOpen && !m_usbMount.valid()) {
-            const auto previousState = m_driveState;
-            PollMedia();
-            if (previousState != m_driveState) {
+            if (PollMedia()) {
                 const Page activePage = m_page == Page::Confirm ? m_returnPage : m_page;
                 if (activePage == Page::Slots || activePage == Page::Slot) {
                     m_confirm = {};
                     SetPage(m_stateAction == StateAction::Manage ? Page::Saves : Page::Game);
+                } else if (activePage == Page::Cheats) {
+                    SetPage(m_cheats.Entries().empty() ? Page::Game : Page::Cheats);
                 } else if (m_page == Page::Game || m_page == Page::Saves) {
                     BuildRows();
                 }
@@ -932,8 +1064,13 @@ int Frontend::Run() {
             if (m_dirty) {
                 std::vector<MenuHint> hints;
                 if (m_page != Page::Controls && !m_rows.empty()) {
-                    hints.push_back(
-                        {MenuIcon::Cross, m_page == Page::Video || m_page == Page::Audio ? "Change" : "Select"});
+                    const char *label = "Select";
+                    if (m_page == Page::Cheats) {
+                        label = "Toggle";
+                    } else if (m_page == Page::Video || m_page == Page::Audio) {
+                        label = "Change";
+                    }
+                    hints.push_back({MenuIcon::Cross, label});
                 }
                 if (m_page != Page::Home) {
                     hints.push_back({MenuIcon::Circle, m_page == Page::Game ? "Resume" : "Back"});
@@ -986,6 +1123,7 @@ int Frontend::Run() {
             const bool due = now + 1ms >= m_emuDeadline;
             if (due) {
                 PollMedia();
+                m_cheats.Apply(*m_saturn);
                 m_saturn->RunFrame();
                 m_emuDeadline += framePeriod;
                 if (now - m_emuDeadline >= framePeriod) {

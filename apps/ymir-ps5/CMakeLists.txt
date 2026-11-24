@@ -19,8 +19,10 @@ set(_title_icon "${CMAKE_CURRENT_SOURCE_DIR}/assets/icon0.png")
 cmrc_add_resource_library(ymir-ps5-assets
     NAMESPACE ymir_ps5_assets WHENCE "${_desktop_dir}/res/embed/fonts" "${_menu_font}"
 )
-cmrc_add_resources(ymir-ps5-assets WHENCE "${CMAKE_CURRENT_SOURCE_DIR}/assets" "${_title_icon}")
-add_library(ymir-ps5-ui STATIC src/covers.cpp src/menu.cpp src/storage.cpp)
+cmrc_add_resources(ymir-ps5-assets WHENCE "${CMAKE_CURRENT_SOURCE_DIR}/assets"
+    "${_title_icon}" "${CMAKE_CURRENT_SOURCE_DIR}/assets/cheats.tsv"
+)
+add_library(ymir-ps5-ui STATIC src/cheats.cpp src/covers.cpp src/menu.cpp src/storage.cpp)
 target_include_directories(ymir-ps5-ui PRIVATE
     "${ymir_ps5_cereal_SOURCE_DIR}/include"
     "${_desktop_dir}/src"
