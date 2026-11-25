@@ -18,7 +18,9 @@ inline constexpr size_t kLibraryPageSize = kLibraryColumns * 2;
 
 struct CoverImage;
 
-enum class MenuIcon { None, Play, Disc, Folder, Video, Audio, Save, Exit, Cross, Circle, Square, Triangle, DPad };
+enum class MenuIcon {
+    None, Play, Disc, Folder, Cartridge, Cheats, Video, Audio, Save, Exit, Cross, Circle, Square, Triangle, DPad
+};
 
 struct MenuRow {
     std::string label;

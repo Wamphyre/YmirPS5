@@ -103,6 +103,11 @@ struct Saturn {
     /// @return the hash code of the currently loaded game disc image
     [[nodiscard]] XXH128Hash GetDiscHash() const noexcept;
 
+    /// @brief Returns a counter advanced when the CD interface reports a media change.
+    [[nodiscard]] uint64 GetMediaChangeCount() const noexcept {
+        return m_mediaChangeCount;
+    }
+
     /// @brief Retrieves the CD interface currently in use.
     /// @return the current CD interface
     [[nodiscard]] const media::CDInterface &GetCDInterface() const noexcept {
@@ -456,6 +461,7 @@ private:
     // TODO: use an abstraction to support reading from real drives as well as disc images
     media::CDInterface m_cdif;  ///< CD interface containing currently loaded disc
     media::fs::Filesystem m_fs; ///< Filesystem contained in the disc
+    uint64 m_mediaChangeCount = 0;
 
     uint64 m_msh2SpilloverCycles; ///< Master SH-2 execution cycles spilled over between executions
     uint64 m_ssh2SpilloverCycles; ///< Slave SH-2 execution cycles spilled over between executions

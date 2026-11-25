@@ -34,13 +34,25 @@ bool IsWorkRAM(uint32_t address) {
 
 } // namespace
 
-void Cheats::Load(const ymir::media::SaturnHeader *header) {
+bool Cheats::UpdateDisc(const ymir::Saturn &saturn, bool reset) {
+    const auto mediaChangeCount = saturn.GetMediaChangeCount();
+    if (!reset && m_mediaChangeCount == mediaChangeCount) {
+        return false;
+    }
+    m_mediaChangeCount = mediaChangeCount;
     m_entries.clear();
     m_enabled = 0;
-    if (!header || !header->IsValid() || header->productNumber.empty() || header->version.empty()) {
-        return;
+    const auto &cd = saturn.GetCDInterface();
+    const auto &header = cd.GetDiscHeader();
+    m_hasIdentifiedDisc =
+        cd.HasDisc() && header.IsValid() && !header.productNumber.empty() && !header.version.empty();
+    if (m_hasIdentifiedDisc) {
+        Load(header);
     }
+    return true;
+}
 
+void Cheats::Load(const ymir::media::SaturnHeader &header) {
     const auto file = cmrc::ymir_ps5_assets::get_filesystem().open("cheats.tsv");
     std::string_view catalog{file.begin(), file.size()};
     if (TakeField(catalog, '\n') != "YMIRPS5_CHEATS_1") {
@@ -48,12 +60,12 @@ void Cheats::Load(const ymir::media::SaturnHeader *header) {
     }
     while (!catalog.empty()) {
         auto line = TakeField(catalog, '\n');
-        if (TakeField(line, '\t') != header->productNumber || TakeField(line, '\t') != header->version ||
-            TakeField(line, '\t') != header->releaseDate || TakeField(line, '\t') != header->deviceInfo) {
+        if (TakeField(line, '\t') != header.productNumber || TakeField(line, '\t') != header.version ||
+            TakeField(line, '\t') != header.releaseDate || TakeField(line, '\t') != header.deviceInfo) {
             continue;
         }
         uint32_t areas = 0;
-        if (!ParseHex(TakeField(line, '\t'), areas) || areas != static_cast<uint32_t>(header->compatAreaCode)) {
+        if (!ParseHex(TakeField(line, '\t'), areas) || areas != static_cast<uint32_t>(header.compatAreaCode)) {
             continue;
         }
         const auto name = TakeField(line, '\t');
@@ -109,7 +121,7 @@ void Cheats::Apply(ymir::Saturn &saturn) const {
     const bool updateSlaveCache = saturn.IsSH2CacheEmulationEnabled() && saturn.slaveSH2Enabled;
     for (const auto &entry : m_entries) {
         if (!entry.enabled ||
-            (entry.condition && master.MemPeekWord(entry.condition->address, false) != entry.condition->value)) {
+            (entry.condition && master.MemPeekWord(entry.condition->address, true) != entry.condition->value)) {
             continue;
         }
         for (const auto &write : entry.writes) {

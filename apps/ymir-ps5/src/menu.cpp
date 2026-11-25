@@ -224,6 +224,21 @@ void MenuCanvas::Icon(MenuIcon icon, int x, int y, uint32_t color) {
     case MenuIcon::Play: line(-5, -7, 7, 0); line(7, 0, -5, 7); line(-5, 7, -5, -7); break;
     case MenuIcon::Disc: circle(8); circle(2); break;
     case MenuIcon::Folder: rect(-9, -4, 9, 7); line(-9, -4, -9, -7); line(-9, -7, -2, -7); break;
+    case MenuIcon::Cartridge:
+        rect(-8, -8, 8, 5);
+        rect(-4, -4, 4, 1);
+        line(-4, 5, -4, 8);
+        line(0, 5, 0, 8);
+        line(4, 5, 4, 8);
+        break;
+    case MenuIcon::Cheats:
+        line(2, -9, -7, 1);
+        line(-7, 1, -1, 1);
+        line(-1, 1, -3, 9);
+        line(-3, 9, 7, -2);
+        line(7, -2, 1, -2);
+        line(1, -2, 2, -9);
+        break;
     case MenuIcon::Video:
         rect(-9, -7, 9, 4);
         line(0, 4, 0, 8);

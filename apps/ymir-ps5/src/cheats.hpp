@@ -32,9 +32,13 @@ public:
         bool enabled = false;
     };
 
-    void Load(const ymir::media::SaturnHeader *header);
+    bool UpdateDisc(const ymir::Saturn &saturn, bool reset = false);
     void Toggle(size_t index);
     void Apply(ymir::Saturn &saturn) const;
+
+    bool HasIdentifiedDisc() const {
+        return m_hasIdentifiedDisc;
+    }
 
     std::span<const Entry> Entries() const {
         return m_entries;
@@ -45,8 +49,12 @@ public:
     }
 
 private:
+    void Load(const ymir::media::SaturnHeader &header);
+
     std::vector<Entry> m_entries;
+    uint64_t m_mediaChangeCount = 0;
     size_t m_enabled = 0;
+    bool m_hasIdentifiedDisc = false;
 };
 
 } // namespace ps5

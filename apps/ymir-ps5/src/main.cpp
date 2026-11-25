@@ -25,7 +25,6 @@
 #include <functional>
 #include <future>
 #include <memory>
-#include <optional>
 #include <string_view>
 
 extern "C" int sceSystemServiceHideSplashScreen();
@@ -179,7 +178,6 @@ private:
     void Resume();
     void OpenMenu();
     bool PollMedia();
-    bool UpdateCheatDisc(bool reset = false);
     void InsertBootCartridge();
     double CoreHz() const;
 
@@ -209,7 +207,6 @@ private:
     uint32_t m_saturnButtons = 0;
     std::unique_ptr<ymir::Saturn> m_saturn;
     ps5::Cheats m_cheats;
-    std::optional<ymir::XXH128Hash> m_cheatDisc;
     std::future<std::string> m_usbMount;
     Clock::time_point m_usbStarted{};
     bool m_usbFrameShown = false;
@@ -310,7 +307,7 @@ void Frontend::FinishBoot(std::string game) {
     m_game = std::move(game);
     InsertBootCartridge();
     m_saturn->Reset(true);
-    UpdateCheatDisc(true);
+    m_cheats.UpdateDisc(*m_saturn, true);
     m_video.ClearGameFrame();
     m_driveState = DriveState::Unknown;
     m_started = true;
@@ -320,7 +317,7 @@ void Frontend::FinishBoot(std::string game) {
 void Frontend::CloseGame() {
     m_saturn->EjectDisc();
     m_saturn->RemoveCartridge();
-    UpdateCheatDisc(true);
+    m_cheats.UpdateDisc(*m_saturn);
     m_video.ClearGameFrame();
     m_driveState = DriveState::Unknown;
     m_game.clear();
@@ -355,28 +352,13 @@ void Frontend::InsertBootCartridge() {
     }
 }
 
-bool Frontend::UpdateCheatDisc(bool reset) {
-    const auto &cd = m_saturn->GetCDInterface();
-    const auto &header = cd.GetDiscHeader();
-    std::optional<ymir::XXH128Hash> hash;
-    if (cd.HasDisc() && header.IsValid()) {
-        hash = m_saturn->GetDiscHash();
-    }
-    if (!reset && hash == m_cheatDisc) {
-        return false;
-    }
-    m_cheatDisc = hash;
-    m_cheats.Load(hash ? &header : nullptr);
-    return true;
-}
-
 bool Frontend::PollMedia() {
     if (!m_started) {
         return false;
     }
     const auto &cd = m_saturn->GetCDInterface();
     const auto state = cd.PollDriveState();
-    const bool discChanged = UpdateCheatDisc();
+    const bool discChanged = m_cheats.UpdateDisc(*m_saturn);
     if (state == m_driveState && !discChanged) {
         return false;
     }
@@ -416,7 +398,7 @@ void Frontend::BuildRows() {
         m_rows = {{"Boot USB disc", "Optical drive", true, MenuIcon::Disc},
                   {"Game library", "CHD, CUE, CCD, MDS, ISO", true, MenuIcon::Folder},
                   {"Boot Saturn BIOS", "Without a disc", true, MenuIcon::Play},
-                  {"RAM cartridge", kCartridgeLabels[size_t(m_cartridgeMode)]},
+                  {"RAM cartridge", kCartridgeLabels[size_t(m_cartridgeMode)], true, MenuIcon::Cartridge},
                   {"Video settings", VideoProfile(m_settings), true, MenuIcon::Video},
                   {"Audio settings", "", true, MenuIcon::Audio},
                   {"Saved games", "", true, MenuIcon::Save},
@@ -425,7 +407,8 @@ void Frontend::BuildRows() {
     case Page::Game: {
         const bool hasStates = !m_storage.StatePath(*m_saturn, 1).empty();
         const auto cheatCount = m_cheats.Entries().size();
-        std::string cheatDetail = m_cheatDisc ? "No codes for this disc" : "Requires an identified disc";
+        std::string cheatDetail =
+            m_cheats.HasIdentifiedDisc() ? "No codes for this disc" : "Requires an identified disc";
         if (cheatCount) {
             cheatDetail = std::to_string(m_cheats.EnabledCount()) + " enabled";
         }
@@ -435,8 +418,8 @@ void Frontend::BuildRows() {
         m_rows = {{"Resume", "", true, MenuIcon::Play},
                   {"Close game", "Return to Home", true, MenuIcon::Folder},
                   {"Restart game", "", true, MenuIcon::Play},
-                  {"Cheats", cheatDetail, cheatCount != 0},
-                  {"RAM cartridge", CartridgeLabel(m_saturn->GetCartridge().GetType())},
+                  {"Cheats", cheatDetail, cheatCount != 0, MenuIcon::Cheats},
+                  {"RAM cartridge", CartridgeLabel(m_saturn->GetCartridge().GetType()), true, MenuIcon::Cartridge},
                   {"Save state", stateDetail, hasStates, MenuIcon::Save},
                   {"Load state", stateDetail, hasStates, MenuIcon::Save},
                   {"Exit YmirPS5", "Return to the PS5 home screen", true, MenuIcon::Exit},

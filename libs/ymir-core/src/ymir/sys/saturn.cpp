@@ -840,6 +840,7 @@ void Saturn::SetCDBlockLLE(bool enabled) {
 // media::CDInterfaceCallbacks implementation
 
 void Saturn::OnMediaChanged() {
+    ++m_mediaChangeCount;
     // Copy file system structure from disc
     m_fs = m_cdif.GetFilesystem();
 

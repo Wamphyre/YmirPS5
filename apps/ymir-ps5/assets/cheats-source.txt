@@ -14,6 +14,10 @@ including groups of writes and an equality condition followed by one write.
 Unmatched discs, hardware setup codes, placeholders, unsupported formats and
 duplicates were removed.
 
+In Dark Savior, the writes for each set of keys are grouped into one toggle.
+Andretti Racing tire names follow the individual wheels documented here:
+https://almarsguides.com/retro/walkthroughs/saturn/games/andrettiracing/actionreplay/
+
 Each tab-separated row after the header contains the Saturn product number,
 version, release date, CD identifier, region bitmask in hexadecimal, cheat
 name, and space-separated operations. Each operation consists of eight
