@@ -1,6 +1,6 @@
 # Compilar YmirPS5
 
-La compilación de PS5 genera un único paquete instalable, `YmirPS5-0.7.3-PPSA98567.zip`. Vulkan forma parte del paquete. VideoOut proporciona una ruta de recuperación en tiempo de ejecución.
+La compilación de PS5 genera un único paquete instalable, `YmirPS5-0.7.4-PPSA98567.zip`. Vulkan forma parte del paquete. VideoOut proporciona una ruta de recuperación en tiempo de ejecución.
 
 ## Dependencias
 

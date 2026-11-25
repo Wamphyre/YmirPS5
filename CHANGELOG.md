@@ -1,5 +1,13 @@
 # Ymir changelog
 
+## YmirPS5 0.7.4
+
+- Added menu icons for **RAM cartridge** and **Cheats**.
+- Fixed cheats staying active when switching between discs without an identifiable filesystem hash.
+- Fixed conditional cheats reading stale SH-2 cache data. Grouped the key codes in *Dark Savior* and clarified the tire codes in *Andretti Racing*.
+
+Internal resolution scaling remains unavailable with the current Saturn renderer. The resolution and FSR 1 options scale the completed frame for display.
+
 ## YmirPS5 0.7.3
 
 - Added automatic and manual selection of 1 MiB and 4 MiB Saturn RAM cartridges for disc images and USB CDs.
